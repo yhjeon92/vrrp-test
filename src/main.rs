@@ -1,29 +1,22 @@
 use std::{
-    ffi::OsString,
-    fmt::Error,
+    convert::TryInto,
     net::Ipv4Addr,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    process::exit,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
 
 use std::io;
 
-use bincode::{deserialize, Options};
+use bincode::Options;
 use core::mem;
 use serde::Deserialize;
 
 use nix::{
-    errno::Errno,
-    ioctl_read,
-    libc::{sockaddr, sockaddr_ll},
-    sys::socket::{
-        bind, recvfrom, setsockopt, socket, sockopt, IpMembershipRequest, SetSockOpt, SockFlag,
-        SockProtocol, SockaddrIn,
-    },
+    libc::{recvfrom, sockaddr, sockaddr_ll, socket},
+    sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, SockaddrIn},
 };
 
 #[repr(C)]
-struct ioctl_flags {
+struct IOctlFlags {
     ifr_name: [u8; 16],
     ifr_flags: i16,
 }
@@ -99,7 +92,10 @@ fn main() {
                 mem::transmute::<*mut nix::libc::sockaddr_ll, *mut sockaddr>(mem::zeroed());
             let mut addr_buf_len: nix::libc::socklen_t =
                 mem::size_of::<sockaddr_ll>() as nix::libc::socklen_t;
-            let len = match nix::libc::recvfrom(
+
+            // recvfrom(sock_fd.as_raw_fd(), pkt_buf.as_mut());
+
+            let len = match recvfrom(
                 sock_fd.as_raw_fd(),
                 pkt_buf.as_mut_ptr() as *mut nix::libc::c_void,
                 pkt_buf.len(),
@@ -128,13 +124,26 @@ fn main() {
             }
             print!("\n");
 
-            println!("IP CHECKSUM {}", vrrp_pkt.ip_checksum);
-            println!("CHECKSUM {}", vrrp_pkt.checksum);
+            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
 
-            for ind in 0..vrrp_pkt.cnt_ip_addr {}
+            for ind in 0..vrrp_pkt.cnt_ip_addr {
+                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+                        .try_into()
+                        .unwrap(),
+                )));
+            }
 
-            verify_ip_checksum(&vrrp_pkt);
-            print_vrrpv2_packet(&vrrp_pkt);
+            let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
+
+            match verify_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
+                Ok(_) => {
+                    print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                }
+                Err(err) => {
+                    println!("[ERROR] {}", err);
+                }
+            }
         }
     }
 }
@@ -144,7 +153,7 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
 
     unsafe {
         // AddressFamily AF_INET, SocketType SOCK_RAW, Protocol 112 (vrrp)
-        sock_fd = match nix::libc::socket(0x02, 0x03, 0x70) {
+        sock_fd = match socket(0x02, 0x03, 0x70) {
             -1 => {
                 return Err(format!(
                     "Failed to open a raw socket - check the process privileges"
@@ -183,7 +192,7 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
         ifname_slice[i] = *b;
     }
 
-    let mut if_opts = ioctl_flags {
+    let mut if_opts = IOctlFlags {
         ifr_name: {
             let mut buf = [0u8; 16];
             buf.clone_from_slice(ifname_slice);
@@ -218,9 +227,7 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
 
     let ip_mreq = IpMembershipRequest::new(
         Ipv4Addr::new(224, 0, 0, 18),
-        // None,
         Some(Ipv4Addr::new(0, 0, 0, 0)),
-        // Some(Ipv4Addr::new(192, 1, 3, 121)),
     );
 
     match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
@@ -240,17 +247,27 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
     return Ok(sock_fd);
 }
 
-fn print_vrrpv2_packet(pkt: &VrrpV2Packet) {
+fn print_vrrpv2_packet(pkt: &VrrpV2Packet, addresses: &Vec<Ipv4Addr>, auth_data: &[u8]) {
     println!("\t{}: {}", "Source", Ipv4Addr::from(pkt.ip_src));
     println!("\t{}: {}", "RouterId", pkt.router_id);
     println!("\t{}: {}", "Priority", pkt.priority);
     println!("\t{}: {}", "AuthType", pkt.auth_type);
     println!("\t{}: {}", "Interval", pkt.advert_int);
+    println!("\t{}:", "VIPs");
+    for address in addresses {
+        println!("\t{}", address.to_string());
+    }
+    println!("\t{}: {}", "AuthData", String::from_utf8_lossy(auth_data));
 }
 
-fn verify_ip_checksum(pkt: &VrrpV2Packet) -> bool {
+fn verify_checksum(
+    pkt: &VrrpV2Packet,
+    addresses: &Vec<Ipv4Addr>,
+    auth_data: &[u8],
+) -> Result<String, String> {
     let mut sum: u32 = 0;
 
+    // IP Packet Checksum
     sum += u16::from_be_bytes([pkt.ip_ver, pkt.ip_dscp]) as u32;
     sum += pkt.ip_length as u32;
     sum += pkt.ip_id as u32;
@@ -261,11 +278,40 @@ fn verify_ip_checksum(pkt: &VrrpV2Packet) -> bool {
     sum += u16::from_be_bytes([pkt.ip_dst[0], pkt.ip_dst[1]]) as u32;
     sum += u16::from_be_bytes([pkt.ip_dst[2], pkt.ip_dst[3]]) as u32;
 
-    println!("CHECKSUM {:05X?}", sum);
-
     sum += pkt.ip_checksum as u32;
 
-    println!("VERIFYING CHECKSUM {:05X?}", sum);
+    sum = (sum & 0xFFFF) + (sum >> 16);
 
-    return true;
+    if sum != 0xFFFF {
+        return Err(format!("Failed to verify IP packet checksum"));
+    }
+
+    sum = 0;
+
+    sum += u16::from_be_bytes([pkt.ver_type, pkt.router_id]) as u32;
+    sum += u16::from_be_bytes([pkt.priority, pkt.cnt_ip_addr]) as u32;
+    sum += u16::from_be_bytes([pkt.auth_type, pkt.advert_int]) as u32;
+
+    for (_, address) in addresses.iter().enumerate() {
+        let address_bytes = address.octets();
+        sum += u16::from_be_bytes(address_bytes[0..2].try_into().unwrap()) as u32;
+        sum += u16::from_be_bytes(address_bytes[2..4].try_into().unwrap()) as u32;
+    }
+
+    let mut ind = 0;
+
+    while ind < auth_data.len() {
+        sum += u16::from_be_bytes(auth_data[ind..ind + 2].try_into().unwrap()) as u32;
+        ind += 2;
+    }
+
+    sum += pkt.checksum as u32;
+
+    sum = (sum & 0xFFFF) + (sum >> 16);
+
+    if sum != 0xFFFF {
+        return Err(format!("Failed to verify VRRPv2 packet checksum"));
+    } else {
+        return Ok(format!("success"));
+    }
 }
