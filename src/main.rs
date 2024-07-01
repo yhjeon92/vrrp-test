@@ -8,12 +8,25 @@ use std::io;
 
 use bincode::Options;
 use core::mem;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use nix::{
     libc::{recvfrom, sockaddr, sockaddr_ll, socket},
-    sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, SockaddrIn},
+    sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, MsgFlags, SockaddrIn},
 };
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of network interface.
+    #[arg(short)]
+    interface: String,
+    /// Run in ReadOnly mode. Do not advertise and only print received VRRPv2 packet if set.
+    #[arg(short, default_value_t = false)]
+    router: bool,
+}
 
 #[repr(C)]
 struct IOctlFlags {
@@ -21,7 +34,7 @@ struct IOctlFlags {
     ifr_flags: i16,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct VrrpV2Packet {
     // IPv4 Header Fields
     ip_ver: u8,
@@ -45,9 +58,65 @@ struct VrrpV2Packet {
     checksum: u16,
 }
 
+impl VrrpV2Packet {
+    fn to_bytes(&self, addresses: &Vec<Ipv4Addr>, auth_data: &[u8]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let ip_hdr_checksum: u16 = calculate_ip_checksum(&self);
+        let vrrp_hdr_checksum: u16 = calculate_vrrpv2_checksum(&self, addresses, auth_data);
+        let ip_length = (28 + 4 * addresses.len() + auth_data.len()) as u16;
+
+        // bytes.push(self.ip_ver);
+        // bytes.push(self.ip_dscp);
+        // bytes.push((ip_length >> 8) as u8);
+        // bytes.push(ip_length as u8);
+        // bytes.push((self.ip_id >> 8) as u8);
+        // bytes.push(self.ip_id as u8);
+        // bytes.push((self.ip_flags >> 8) as u8);
+        // bytes.push(self.ip_flags as u8);
+        // bytes.push(self.ip_ttl);
+        // bytes.push(self.ip_proto);
+
+        // bytes.push((ip_hdr_checksum >> 8) as u8);
+        // bytes.push(ip_hdr_checksum as u8);
+        // // bytes.push((self.ip_checksum >> 8) as u8);
+        // // bytes.push(self.ip_checksum as u8);
+
+        // for src_byte in self.ip_src {
+        //     bytes.push(src_byte);
+        // }
+
+        // for dst_byte in self.ip_dst {
+        //     bytes.push(dst_byte);
+        // }
+
+        bytes.push(self.ver_type);
+        bytes.push(self.router_id);
+        bytes.push(self.priority);
+        bytes.push(self.cnt_ip_addr);
+        bytes.push(self.auth_type);
+        bytes.push(self.advert_int);
+
+        bytes.push((vrrp_hdr_checksum >> 8) as u8);
+        bytes.push(vrrp_hdr_checksum as u8);
+
+        for address in addresses.iter() {
+            for address_byte in address.octets() {
+                bytes.push(address_byte);
+            }
+        }
+
+        for auth_data_byte in auth_data {
+            bytes.push(*auth_data_byte);
+        }
+
+        return bytes;
+    }
+}
+
 fn main() {
-    bincode::options().with_big_endian();
-    let if_name = "enp3s0";
+    let args = Args::parse();
+
+    let if_name = args.interface;
 
     let sock_fd = match open_read_socket(&if_name) {
         Ok(fd) => fd,
@@ -88,60 +157,92 @@ fn main() {
 
         // TODO: unsafe
         unsafe {
-            let addr_ptr =
-                mem::transmute::<*mut nix::libc::sockaddr_ll, *mut sockaddr>(mem::zeroed());
-            let mut addr_buf_len: nix::libc::socklen_t =
-                mem::size_of::<sockaddr_ll>() as nix::libc::socklen_t;
-
-            // recvfrom(sock_fd.as_raw_fd(), pkt_buf.as_mut());
-
-            let len = match recvfrom(
-                sock_fd.as_raw_fd(),
-                pkt_buf.as_mut_ptr() as *mut nix::libc::c_void,
-                pkt_buf.len(),
-                0,
-                addr_ptr as *mut sockaddr,
-                &mut addr_buf_len,
-            ) {
-                -1 => {
-                    return;
+            if args.router {
+                // Router mode
+                let packet = build_vrrpv2_packet();
+                match packet {
+                    Some(pkt) => {
+                        println!("About to send a packet: ");
+                        for pkt_byte in &pkt {
+                            print!("{:02X} ", pkt_byte);
+                        }
+                        match nix::sys::socket::sendto(
+                            sock_fd.as_raw_fd(),
+                            &pkt.as_slice(),
+                            &SockaddrIn::new(224, 0, 0, 18, 112),
+                            MsgFlags::empty(),
+                        ) {
+                            Ok(size) => {
+                                println!("A VRRPV2 packet was sent! {}", size);
+                            }
+                            Err(err) => {
+                                println!(
+                                    "An error was encountered while sending packet! {}",
+                                    err.to_string()
+                                );
+                            }
+                        }
+                    }
+                    None => (),
                 }
-                len => len,
-            };
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            } else {
+                // ReadOnly mode
+                let addr_ptr =
+                    mem::transmute::<*mut nix::libc::sockaddr_ll, *mut sockaddr>(mem::zeroed());
+                let mut addr_buf_len: nix::libc::socklen_t =
+                    mem::size_of::<sockaddr_ll>() as nix::libc::socklen_t;
 
-            println!("Message of len {}", len);
+                // recvfrom(sock_fd.as_raw_fd(), pkt_buf.as_mut());
 
-            // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
-            let vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_big_endian()
-                .deserialize(&pkt_buf[0..28])
-                .unwrap();
+                let len = match recvfrom(
+                    sock_fd.as_raw_fd(),
+                    pkt_buf.as_mut_ptr() as *mut nix::libc::c_void,
+                    pkt_buf.len(),
+                    0,
+                    addr_ptr as *mut sockaddr,
+                    &mut addr_buf_len,
+                ) {
+                    -1 => {
+                        return;
+                    }
+                    len => len,
+                };
 
-            for ind in 0..len {
-                print!("{:02X?} ", pkt_buf[ind as usize]);
-            }
-            print!("\n");
+                println!("Message of len {}", len);
 
-            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+                // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+                let vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .allow_trailing_bytes()
+                    .with_big_endian()
+                    .deserialize(&pkt_buf[0..28])
+                    .unwrap();
 
-            for ind in 0..vrrp_pkt.cnt_ip_addr {
-                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
-                        .try_into()
-                        .unwrap(),
-                )));
-            }
-
-            let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
-
-            match verify_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
-                Ok(_) => {
-                    print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                for ind in 0..len {
+                    print!("{:02X?} ", pkt_buf[ind as usize]);
                 }
-                Err(err) => {
-                    println!("[ERROR] {}", err);
+                print!("\n");
+
+                let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+
+                for ind in 0..vrrp_pkt.cnt_ip_addr {
+                    vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+                        pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+                            .try_into()
+                            .unwrap(),
+                    )));
+                }
+
+                let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
+
+                match verify_vrrpv2_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
+                    Ok(_) => {
+                        print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                    }
+                    Err(err) => {
+                        println!("[ERROR] {}", err);
+                    }
                 }
             }
         }
@@ -260,7 +361,7 @@ fn print_vrrpv2_packet(pkt: &VrrpV2Packet, addresses: &Vec<Ipv4Addr>, auth_data:
     println!("\t{}: {}", "AuthData", String::from_utf8_lossy(auth_data));
 }
 
-fn verify_checksum(
+fn verify_vrrpv2_checksum(
     pkt: &VrrpV2Packet,
     addresses: &Vec<Ipv4Addr>,
     auth_data: &[u8],
@@ -286,6 +387,7 @@ fn verify_checksum(
         return Err(format!("Failed to verify IP packet checksum"));
     }
 
+    // VRRPv2 Packet Checksum
     sum = 0;
 
     sum += u16::from_be_bytes([pkt.ver_type, pkt.router_id]) as u32;
@@ -314,4 +416,76 @@ fn verify_checksum(
     } else {
         return Ok(format!("success"));
     }
+}
+
+fn calculate_ip_checksum(pkt: &VrrpV2Packet) -> u16 {
+    let mut sum: u32 = 0;
+    // let pkt_length: u16 = (28 + 4 * addresses.len() + auth_data.len()) as u16;
+    sum += u16::from_be_bytes([pkt.ip_ver, pkt.ip_dscp]) as u32;
+    sum += pkt.ip_length as u32;
+    sum += pkt.ip_id as u32;
+    sum += pkt.ip_flags as u32;
+    sum += u16::from_be_bytes([pkt.ip_ttl, pkt.ip_proto]) as u32;
+    sum += u16::from_be_bytes([pkt.ip_src[0], pkt.ip_src[1]]) as u32;
+    sum += u16::from_be_bytes([pkt.ip_src[2], pkt.ip_src[3]]) as u32;
+    sum += u16::from_be_bytes([pkt.ip_dst[0], pkt.ip_dst[1]]) as u32;
+    sum += u16::from_be_bytes([pkt.ip_dst[2], pkt.ip_dst[3]]) as u32;
+
+    return !((sum & 0xFFFF) + (sum >> 16)) as u16;
+}
+
+fn calculate_vrrpv2_checksum(
+    pkt: &VrrpV2Packet,
+    addresses: &Vec<Ipv4Addr>,
+    auth_data: &[u8],
+) -> u16 {
+    let mut sum: u32 = 0;
+    sum += u16::from_be_bytes([pkt.ver_type, pkt.router_id]) as u32;
+    sum += u16::from_be_bytes([pkt.priority, pkt.cnt_ip_addr]) as u32;
+    sum += u16::from_be_bytes([pkt.auth_type, pkt.advert_int]) as u32;
+
+    for (_, address) in addresses.iter().enumerate() {
+        let address_bytes = address.octets();
+        sum += u16::from_be_bytes(address_bytes[0..2].try_into().unwrap()) as u32;
+        sum += u16::from_be_bytes(address_bytes[2..4].try_into().unwrap()) as u32;
+    }
+
+    let mut ind = 0;
+
+    while ind < auth_data.len() {
+        sum += u16::from_be_bytes(auth_data[ind..ind + 2].try_into().unwrap()) as u32;
+        ind += 2;
+    }
+
+    return !((sum & 0xFFFF) + (sum >> 16)) as u16;
+}
+
+fn build_vrrpv2_packet() -> Option<Vec<u8>> {
+    let pkt_hdr = VrrpV2Packet {
+        ip_ver: 0x45,
+        ip_dscp: 0xC0,
+        ip_length: 0x28,
+        ip_id: 0x00,
+        ip_flags: 0x00,
+        ip_ttl: 0xFF,
+        ip_proto: 0x70,
+        ip_checksum: 0x00,
+        ip_src: [192, 1, 3, 121],
+        ip_dst: [224, 0, 0, 18],
+
+        ver_type: 0x21,
+        router_id: 0x30,   // 48
+        priority: 0x30,    // 48
+        cnt_ip_addr: 0x01, // 1 vip
+        auth_type: 0x01,
+        advert_int: 0x05,
+        checksum: 0x00,
+    };
+
+    let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+    vip_addresses.push(Ipv4Addr::new(192, 1, 3, 121));
+
+    let auth_data: [u8; 8] = [49, 49, 49, 49, 0, 0, 0, 0];
+
+    return Some(pkt_hdr.to_bytes(&vip_addresses, &auth_data));
 }
