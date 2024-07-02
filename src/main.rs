@@ -1,5 +1,7 @@
 use std::{
     convert::TryInto,
+    fs::File,
+    io::Read,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
@@ -7,12 +9,21 @@ use std::{
 use std::io;
 
 use bincode::Options;
-use core::mem;
+
+mod constants;
+use constants::{
+    AF_INET, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_VRRPV2, SOCKET_TTL,
+    SOCK_RAW,
+};
 use serde::{Deserialize, Serialize};
 
 use nix::{
-    libc::{recvfrom, sockaddr, sockaddr_ll, socket},
-    sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, MsgFlags, SockaddrIn},
+    libc::socket,
+    sys::socket::{
+        bind, recvfrom, setsockopt,
+        sockopt::{self},
+        IpMembershipRequest, MsgFlags, SockaddrIn,
+    },
 };
 
 use clap::Parser;
@@ -20,12 +31,36 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Name of network interface.
-    #[arg(short)]
+    /// Name of network interface, defaults to lo. Required for Read Only mode (without -r flag) only.
+    #[arg(short, default_value_t = String::new())]
     interface: String,
-    /// Run in Virtual Router mode. Multicast advertise packet if set, otherwise just print received VRRPv2 packet on the specified interface.
+    /// Option to run in Virtual Router mode, defaults to false. Multicast advertise packet if set, otherwise just print received VRRPv2 packet on the specified interface.
     #[arg(short, default_value_t = false)]
     router: bool,
+    /// Path to the virtual router config file, defaults to vrrp-test.toml in working dir. Required for Virtual Router mode only.
+    #[arg(short, default_value_t = String::from("vrrp-test.toml"))]
+    config_file_path: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    interface: String,
+    router_id: u8,
+    priority: u8,
+    advert_int: u8,
+    virtual_ip: Ipv4Addr,
+}
+
+impl Config {
+    fn dummy() -> Config {
+        Config {
+            interface: String::new(),
+            router_id: 0,
+            priority: 0,
+            advert_int: 255,
+            virtual_ip: Ipv4Addr::new(0, 0, 0, 0),
+        }
+    }
 }
 
 #[repr(C)]
@@ -34,7 +69,7 @@ struct IOctlFlags {
     ifr_flags: i16,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 struct VrrpV2Packet {
     // IPv4 Header Fields
     ip_ver: u8,
@@ -91,12 +126,61 @@ impl VrrpV2Packet {
 fn main() {
     let args = Args::parse();
 
-    let if_name = args.interface;
+    let config: Config = match args.router {
+        true => {
+            let mut contents = String::new();
+            let mut file = match File::open(args.config_file_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    println!("[ERROR] while opening config file: {}", err.to_string());
+                    return;
+                }
+            };
+
+            match file.read_to_string(&mut contents) {
+                Ok(_) => (),
+                Err(err) => {
+                    println!("[ERROR] while reading config file: {}", err.to_string());
+                    return;
+                }
+            };
+
+            match toml::from_str::<Config>(&contents) {
+                Ok(config) => {
+                    println!("Interface  {}", config.interface);
+                    println!("Router Id  {}", config.router_id);
+                    println!("Priority   {}", config.priority);
+                    println!("Interval   {}", config.advert_int);
+                    println!("Virtual IP {}", config.virtual_ip.to_string());
+                    config
+                }
+                Err(err) => {
+                    println!(
+                        "[ERROR] while parsing configuration file: {}",
+                        err.to_string()
+                    );
+                    return;
+                }
+            }
+        }
+        false => Config::dummy(),
+    };
+
+    let if_name = match args.router {
+        true => config.interface,
+        false => match args.interface.is_empty() {
+            true => {
+                println!("[ERROR] Network interface name must be specified with -i flag in Readonly mode");
+                return;
+            }
+            false => args.interface,
+        },
+    };
 
     let sock_fd = match open_read_socket(&if_name) {
         Ok(fd) => fd,
         Err(err) => {
-            println!("[ERROR] {}", err.to_string());
+            println!("[ERROR] while opening socket: {}", err.to_string());
             return;
         }
     };
@@ -106,118 +190,85 @@ fn main() {
     let mut pkt_buf: [u8; 1024] = [0; 1024];
 
     loop {
-        // match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
-        //     Ok((len, from)) => {
-        //         pkt_buf[len] = 0;
-        //         let message = String::from_utf8_lossy(&pkt_buf);
-        //         println!(
-        //             "Message of len {} from {}: {}",
-        //             len,
-        //             match from {
-        //                 None => String::new(),
-        //                 Some(from_addr) => from_addr.to_string(),
-        //             },
-        //             message
-        //         );
-
-        //         for ind in 0..len {
-        //             print!("{} ", pkt_buf[ind]);
-        //         }
-        //         print!("\n");
-        //     }
-        //     Err(e) => {
-        //         println!("{}", e.to_string())
-        //     }
-        // };
-
-        // TODO: unsafe
-        unsafe {
-            if args.router {
-                // Router mode
-                let packet = build_vrrpv2_packet();
-                match packet {
-                    Some(pkt) => {
-                        println!("About to send a packet: ");
-                        for pkt_byte in &pkt {
-                            print!("{:02X} ", pkt_byte);
+        if args.router {
+            // Router mode
+            let packet = build_vrrpv2_packet();
+            match packet {
+                Some(pkt) => {
+                    println!("About to send a packet: ");
+                    for pkt_byte in &pkt {
+                        print!("{:02X} ", pkt_byte);
+                    }
+                    match nix::sys::socket::sendto(
+                        sock_fd.as_raw_fd(),
+                        &pkt.as_slice(),
+                        &SockaddrIn::new(224, 0, 0, 18, 112),
+                        MsgFlags::empty(),
+                    ) {
+                        Ok(size) => {
+                            println!("A VRRPV2 packet was sent! {}", size);
                         }
-                        match nix::sys::socket::sendto(
-                            sock_fd.as_raw_fd(),
-                            &pkt.as_slice(),
-                            &SockaddrIn::new(224, 0, 0, 18, 112),
-                            MsgFlags::empty(),
-                        ) {
-                            Ok(size) => {
-                                println!("A VRRPV2 packet was sent! {}", size);
-                            }
-                            Err(err) => {
-                                println!(
-                                    "An error was encountered while sending packet! {}",
-                                    err.to_string()
-                                );
-                            }
+                        Err(err) => {
+                            println!(
+                                "An error was encountered while sending packet! {}",
+                                err.to_string()
+                            );
                         }
                     }
-                    None => (),
                 }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            } else {
-                // ReadOnly mode
-                let addr_ptr =
-                    mem::transmute::<*mut nix::libc::sockaddr_ll, *mut sockaddr>(mem::zeroed());
-                let mut addr_buf_len: nix::libc::socklen_t =
-                    mem::size_of::<sockaddr_ll>() as nix::libc::socklen_t;
-
-                // recvfrom(sock_fd.as_raw_fd(), pkt_buf.as_mut());
-
-                let len = match recvfrom(
-                    sock_fd.as_raw_fd(),
-                    pkt_buf.as_mut_ptr() as *mut nix::libc::c_void,
-                    pkt_buf.len(),
-                    0,
-                    addr_ptr as *mut sockaddr,
-                    &mut addr_buf_len,
-                ) {
-                    -1 => {
-                        return;
-                    }
-                    len => len,
-                };
-
-                println!("Message of len {}", len);
-
-                // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
-                let vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
-                    .with_fixint_encoding()
-                    .allow_trailing_bytes()
-                    .with_big_endian()
-                    .deserialize(&pkt_buf[0..28])
-                    .unwrap();
-
-                for ind in 0..len {
-                    print!("{:02X?} ", pkt_buf[ind as usize]);
+                None => (),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        } else {
+            // ReadOnly mode
+            let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
+                Ok((pkt_len, sender_addr)) => {
+                    println!("Message of len {}", pkt_len);
+                    match sender_addr {
+                        Some(addr) => {
+                            println!("Sender Address {}", addr.ip().to_string());
+                        }
+                        None => {}
+                    };
+                    pkt_len
                 }
-                print!("\n");
-
-                let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-
-                for ind in 0..vrrp_pkt.cnt_ip_addr {
-                    vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-                        pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
-                            .try_into()
-                            .unwrap(),
-                    )));
+                Err(err) => {
+                    println!("[ERROR] {}", err.to_string());
+                    return;
                 }
+            };
 
-                let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
+            // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+            let vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_big_endian()
+                .deserialize(&pkt_buf[0..28])
+                .unwrap();
 
-                match verify_vrrpv2_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
-                    Ok(_) => {
-                        print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
-                    }
-                    Err(err) => {
-                        println!("[ERROR] {}", err);
-                    }
+            for ind in 0..len {
+                print!("{:02X?} ", pkt_buf[ind as usize]);
+            }
+            print!("\n");
+
+            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+
+            for ind in 0..vrrp_pkt.cnt_ip_addr {
+                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+                        .try_into()
+                        .unwrap(),
+                )));
+            }
+
+            let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
+
+            match verify_vrrpv2_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
+                Ok(_) => {
+                    print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                }
+                Err(err) => {
+                    println!("[ERROR] {}", err);
                 }
             }
         }
@@ -228,8 +279,8 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
     unsafe {
-        // AddressFamily AF_INET, SocketType SOCK_RAW, Protocol 112 (vrrp)
-        sock_fd = match socket(0x02, 0x03, 0x70) {
+        // AddressFamily AF_INET 0x02, SocketType SOCK_RAW 0x03, Protocol IPPROTO_VRRPV2 0x70 (112; vrrp)
+        sock_fd = match socket(AF_INET, SOCK_RAW, IPPROTO_VRRPV2) {
             -1 => {
                 return Err(format!(
                     "Failed to open a raw socket - check the process privileges"
@@ -237,18 +288,6 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
             }
             fd => OwnedFd::from_raw_fd(fd),
         };
-        // sock_fd = match socket(
-        //     nix::sys::socket::AddressFamily::Inet,
-        //     nix::sys::socket::SockType::Raw,
-        //     SockFlag::empty(),
-        //     SockProtocol::EthAll,
-        //     nix::sys::socket::SockProtocol::Vrrp,
-        // ) {
-        //     Ok(fd) => fd,
-        //     Err(err) => {
-        //         return Err(format!("Error while opening socket: {}", err.to_string()));
-        //     }
-        // }
     }
 
     // if_nametoindex는 1-인덱싱, iter().nth()는 0-인덱싱
@@ -279,7 +318,8 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
 
     unsafe {
         // UP (0x01), RUNNING (0x40), MULTICAST (0x1000)
-        if_opts.ifr_flags |= 0x1 | 0x40 | 0x1000;
+        if_opts.ifr_flags |= IFR_FLAG_UP | IFR_FLAG_RUNNING | IFR_FLAG_MULTICAST;
+
         let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCSIFFLAGS, &mut if_opts);
         if res < 0 {
             println!("{}", io::Error::last_os_error().to_string());
@@ -301,7 +341,7 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
-    match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &255) {
+    match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &SOCKET_TTL) {
         Ok(_) => {}
         Err(err) => {
             return Err(format!(
