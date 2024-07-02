@@ -389,10 +389,9 @@ fn verify_vrrpv2_checksum(
     // if sum != 0xFFFF {
     //     return Err(format!("Failed to verify IP packet checksum"));
     // }
+    // sum = 0;
 
     // VRRPv2 Packet Checksum
-    sum = 0;
-
     sum += u16::from_be_bytes([pkt.ver_type, pkt.router_id]) as u32;
     sum += u16::from_be_bytes([pkt.priority, pkt.cnt_ip_addr]) as u32;
     sum += u16::from_be_bytes([pkt.auth_type, pkt.advert_int]) as u32;
