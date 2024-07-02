@@ -15,7 +15,7 @@ use nix::{
     sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, MsgFlags, SockaddrIn},
 };
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -23,7 +23,7 @@ struct Args {
     /// Name of network interface.
     #[arg(short)]
     interface: String,
-    /// Run in ReadOnly mode. Do not advertise and only print received VRRPv2 packet if set.
+    /// Run in Virtual Router mode. Multicast advertise packet if set, otherwise just print received VRRPv2 packet on the specified interface.
     #[arg(short, default_value_t = false)]
     router: bool,
 }
@@ -49,6 +49,7 @@ struct VrrpV2Packet {
     ip_dst: [u8; 4],
 
     // VRRPV2 Packet Fields
+    // Version (4-bits; 2 for vrrpv2, 3 for vrrpv3) + Type (4-bits; vrrp advertisement must be represented by 1)
     ver_type: u8,
     router_id: u8,
     priority: u8,
@@ -61,33 +62,7 @@ struct VrrpV2Packet {
 impl VrrpV2Packet {
     fn to_bytes(&self, addresses: &Vec<Ipv4Addr>, auth_data: &[u8]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
-        let ip_hdr_checksum: u16 = calculate_ip_checksum(&self);
         let vrrp_hdr_checksum: u16 = calculate_vrrpv2_checksum(&self, addresses, auth_data);
-        let ip_length = (28 + 4 * addresses.len() + auth_data.len()) as u16;
-
-        // bytes.push(self.ip_ver);
-        // bytes.push(self.ip_dscp);
-        // bytes.push((ip_length >> 8) as u8);
-        // bytes.push(ip_length as u8);
-        // bytes.push((self.ip_id >> 8) as u8);
-        // bytes.push(self.ip_id as u8);
-        // bytes.push((self.ip_flags >> 8) as u8);
-        // bytes.push(self.ip_flags as u8);
-        // bytes.push(self.ip_ttl);
-        // bytes.push(self.ip_proto);
-
-        // bytes.push((ip_hdr_checksum >> 8) as u8);
-        // bytes.push(ip_hdr_checksum as u8);
-        // // bytes.push((self.ip_checksum >> 8) as u8);
-        // // bytes.push(self.ip_checksum as u8);
-
-        // for src_byte in self.ip_src {
-        //     bytes.push(src_byte);
-        // }
-
-        // for dst_byte in self.ip_dst {
-        //     bytes.push(dst_byte);
-        // }
 
         bytes.push(self.ver_type);
         bytes.push(self.router_id);
@@ -326,6 +301,17 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &255) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while applying IPv4TTL option for socket {}: {}",
+                sock_fd.as_raw_fd().to_string(),
+                err
+            ));
+        }
+    }
+
     let ip_mreq = IpMembershipRequest::new(
         Ipv4Addr::new(224, 0, 0, 18),
         Some(Ipv4Addr::new(0, 0, 0, 0)),
@@ -366,26 +352,43 @@ fn verify_vrrpv2_checksum(
     addresses: &Vec<Ipv4Addr>,
     auth_data: &[u8],
 ) -> Result<String, String> {
+    // RFC 3768
+    // IP TTL
+    if pkt.ip_ttl != 0xFF {
+        return Err(format!("Packet TTL {} is not valid", pkt.ip_ttl));
+    }
+
+    // vrrp version
+    if pkt.ver_type >> 4 != 2 {
+        return Err(format!(
+            "VRRP protocol version {} is not valid",
+            (pkt.ver_type >> 4)
+        ));
+    }
+
+    // Verify virutal router Id with locally configured value
+    // Verify auth type with locally configured value
+
     let mut sum: u32 = 0;
 
     // IP Packet Checksum
-    sum += u16::from_be_bytes([pkt.ip_ver, pkt.ip_dscp]) as u32;
-    sum += pkt.ip_length as u32;
-    sum += pkt.ip_id as u32;
-    sum += pkt.ip_flags as u32;
-    sum += u16::from_be_bytes([pkt.ip_ttl, pkt.ip_proto]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_src[0], pkt.ip_src[1]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_src[2], pkt.ip_src[3]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_dst[0], pkt.ip_dst[1]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_dst[2], pkt.ip_dst[3]]) as u32;
+    // sum += u16::from_be_bytes([pkt.ip_ver, pkt.ip_dscp]) as u32;
+    // sum += pkt.ip_length as u32;
+    // sum += pkt.ip_id as u32;
+    // sum += pkt.ip_flags as u32;
+    // sum += u16::from_be_bytes([pkt.ip_ttl, pkt.ip_proto]) as u32;
+    // sum += u16::from_be_bytes([pkt.ip_src[0], pkt.ip_src[1]]) as u32;
+    // sum += u16::from_be_bytes([pkt.ip_src[2], pkt.ip_src[3]]) as u32;
+    // sum += u16::from_be_bytes([pkt.ip_dst[0], pkt.ip_dst[1]]) as u32;
+    // sum += u16::from_be_bytes([pkt.ip_dst[2], pkt.ip_dst[3]]) as u32;
 
-    sum += pkt.ip_checksum as u32;
+    // sum += pkt.ip_checksum as u32;
 
-    sum = (sum & 0xFFFF) + (sum >> 16);
+    // sum = (sum & 0xFFFF) + (sum >> 16);
 
-    if sum != 0xFFFF {
-        return Err(format!("Failed to verify IP packet checksum"));
-    }
+    // if sum != 0xFFFF {
+    //     return Err(format!("Failed to verify IP packet checksum"));
+    // }
 
     // VRRPv2 Packet Checksum
     sum = 0;
@@ -416,22 +419,6 @@ fn verify_vrrpv2_checksum(
     } else {
         return Ok(format!("success"));
     }
-}
-
-fn calculate_ip_checksum(pkt: &VrrpV2Packet) -> u16 {
-    let mut sum: u32 = 0;
-    // let pkt_length: u16 = (28 + 4 * addresses.len() + auth_data.len()) as u16;
-    sum += u16::from_be_bytes([pkt.ip_ver, pkt.ip_dscp]) as u32;
-    sum += pkt.ip_length as u32;
-    sum += pkt.ip_id as u32;
-    sum += pkt.ip_flags as u32;
-    sum += u16::from_be_bytes([pkt.ip_ttl, pkt.ip_proto]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_src[0], pkt.ip_src[1]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_src[2], pkt.ip_src[3]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_dst[0], pkt.ip_dst[1]]) as u32;
-    sum += u16::from_be_bytes([pkt.ip_dst[2], pkt.ip_dst[3]]) as u32;
-
-    return !((sum & 0xFFFF) + (sum >> 16)) as u16;
 }
 
 fn calculate_vrrpv2_checksum(
