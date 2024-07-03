@@ -1,32 +1,32 @@
+use arc_swap::ArcSwap;
+use bincode::Options;
+use once_cell::sync::Lazy;
+use router::Router;
 use std::{
     convert::TryInto,
     fs::File,
     io::Read,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    sync::Arc,
+    thread,
 };
-
-use std::io;
-
-use bincode::Options;
-
 mod constants;
+mod router;
+use clap::Parser;
 use constants::{
     AF_INET, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_VRRPV2, SOCKET_TTL,
     SOCK_RAW,
 };
-use serde::{Deserialize, Serialize};
-
 use nix::{
     libc::socket,
     sys::socket::{
         bind, recvfrom, setsockopt,
         sockopt::{self},
-        IpMembershipRequest, MsgFlags, SockaddrIn,
+        IpMembershipRequest, SockaddrIn,
     },
 };
-
-use clap::Parser;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -95,6 +95,28 @@ struct VrrpV2Packet {
 }
 
 impl VrrpV2Packet {
+    fn new() -> VrrpV2Packet {
+        VrrpV2Packet {
+            ip_ver: 0x45,
+            ip_dscp: 0xC0,
+            ip_length: 0,
+            ip_id: 0,
+            ip_flags: 0,
+            ip_ttl: SOCKET_TTL,
+            ip_proto: 0x70,
+            ip_checksum: 0,
+            ip_src: [0, 0, 0, 0],
+            ip_dst: [224, 0, 0, 18],
+            ver_type: 0x21,
+            router_id: 0,
+            priority: 0,
+            cnt_ip_addr: 0,
+            auth_type: 0,
+            advert_int: 0,
+            checksum: 0,
+        }
+    }
+
     fn to_bytes(&self, addresses: &Vec<Ipv4Addr>, auth_data: &[u8]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
         let vrrp_hdr_checksum: u16 = calculate_vrrpv2_checksum(&self, addresses, auth_data);
@@ -123,10 +145,14 @@ impl VrrpV2Packet {
     }
 }
 
+static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::from_pointee(Config::dummy()));
+static ADVERT: Lazy<ArcSwap<(bool, VrrpV2Packet)>> =
+    Lazy::new(|| ArcSwap::from_pointee((false, VrrpV2Packet::new())));
+
 fn main() {
     let args = Args::parse();
 
-    let config: Config = match args.router {
+    match args.router {
         true => {
             let mut contents = String::new();
             let mut file = match File::open(args.config_file_path) {
@@ -152,7 +178,7 @@ fn main() {
                     println!("Priority   {}", config.priority);
                     println!("Interval   {}", config.advert_int);
                     println!("Virtual IP {}", config.virtual_ip.to_string());
-                    config
+                    CONFIG.store(Arc::new(config));
                 }
                 Err(err) => {
                     println!(
@@ -163,11 +189,12 @@ fn main() {
                 }
             }
         }
-        false => Config::dummy(),
+        false => (),
     };
 
     let if_name = match args.router {
-        true => config.interface,
+        // true => CONFIG.load_full().interface.clone(),
+        true => CONFIG.load_full().interface.clone(),
         false => match args.interface.is_empty() {
             true => {
                 println!("[ERROR] Network interface name must be specified with -i flag in Readonly mode");
@@ -189,36 +216,105 @@ fn main() {
 
     let mut pkt_buf: [u8; 1024] = [0; 1024];
 
+    if args.router {
+        let router = Router::new(match sock_fd.try_clone() {
+            Ok(cloned_fd) => cloned_fd,
+            Err(err) => {
+                println!(
+                    "[ERROR] Cloning fd {} failed: {}",
+                    sock_fd.as_raw_fd(),
+                    err.to_string()
+                );
+                return;
+            }
+        });
+
+        thread::spawn(move || {
+            router.start();
+        });
+    }
+
     loop {
         if args.router {
             // Router mode
-            let packet = build_vrrpv2_packet();
-            match packet {
-                Some(pkt) => {
-                    println!("About to send a packet: ");
-                    for pkt_byte in &pkt {
-                        print!("{:02X} ", pkt_byte);
-                    }
-                    match nix::sys::socket::sendto(
-                        sock_fd.as_raw_fd(),
-                        &pkt.as_slice(),
-                        &SockaddrIn::new(224, 0, 0, 18, 112),
-                        MsgFlags::empty(),
-                    ) {
-                        Ok(size) => {
-                            println!("A VRRPV2 packet was sent! {}", size);
+            // let packet = build_vrrpv2_packet();
+            // match packet {
+            //     Some(pkt) => {
+            //         println!("About to send a packet: ");
+            //         for pkt_byte in &pkt {
+            //             print!("{:02X} ", pkt_byte);
+            //         }
+            //         match nix::sys::socket::sendto(
+            //             sock_fd.as_raw_fd(),
+            //             &pkt.as_slice(),
+            //             &SockaddrIn::new(224, 0, 0, 18, 112),
+            //             MsgFlags::empty(),
+            //         ) {
+            //             Ok(size) => {
+            //                 println!("A VRRPV2 packet was sent! {}", size);
+            //             }
+            //             Err(err) => {
+            //                 println!(
+            //                     "An error was encountered while sending packet! {}",
+            //                     err.to_string()
+            //                 );
+            //             }
+            //         }
+            //     }
+            //     None => (),
+            // }
+            // std::thread::sleep(std::time::Duration::from_secs(3));
+            let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
+                Ok((pkt_len, sender_addr)) => {
+                    println!("Message of len {}", pkt_len);
+                    match sender_addr {
+                        Some(addr) => {
+                            println!("Sender Address {}", addr.ip().to_string());
                         }
-                        Err(err) => {
-                            println!(
-                                "An error was encountered while sending packet! {}",
-                                err.to_string()
-                            );
-                        }
-                    }
+                        None => {}
+                    };
+                    pkt_len
                 }
-                None => (),
+                Err(err) => {
+                    println!("[ERROR] {}", err.to_string());
+                    return;
+                }
+            };
+
+            // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+            let vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_big_endian()
+                .deserialize(&pkt_buf[0..28])
+                .unwrap();
+
+            for ind in 0..len {
+                print!("{:02X?} ", pkt_buf[ind as usize]);
             }
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            print!("\n");
+
+            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+
+            for ind in 0..vrrp_pkt.cnt_ip_addr {
+                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+                        .try_into()
+                        .unwrap(),
+                )));
+            }
+
+            let auth_data = &pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize];
+
+            match verify_vrrpv2_checksum(&vrrp_pkt, &vip_addresses, auth_data) {
+                Ok(_) => {
+                    // print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                    ADVERT.store(Arc::new((true, vrrp_pkt)));
+                }
+                Err(err) => {
+                    println!("[ERROR] {}", err);
+                }
+            }
         } else {
             // ReadOnly mode
             let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
@@ -322,7 +418,7 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
 
         let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCSIFFLAGS, &mut if_opts);
         if res < 0 {
-            println!("{}", io::Error::last_os_error().to_string());
+            println!("{}", std::io::Error::last_os_error().to_string());
             return Err(format!(
                 "Cannot manipulate network interface {}",
                 interface.name().to_string_lossy()
@@ -500,8 +596,10 @@ fn build_vrrpv2_packet() -> Option<Vec<u8>> {
         ip_dst: [224, 0, 0, 18],
 
         ver_type: 0x21,
-        router_id: 0x30,   // 48
-        priority: 0x30,    // 48
+        // router_id: 0x30,   // 48
+        router_id: CONFIG.load_full().router_id,
+        // priority: 0x30,    // 48
+        priority: CONFIG.load_full().priority,
         cnt_ip_addr: 0x01, // 1 vip
         auth_type: 0x01,
         advert_int: 0x05,
