@@ -1,0 +1,5 @@
+interface = "eth0"
+router_id = 50
+priority = 100
+advert_int = 5
+virtual_ip = "192.168.35.200"

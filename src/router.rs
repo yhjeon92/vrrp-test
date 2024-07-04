@@ -5,13 +5,13 @@ use std::{
     thread,
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{access::Access, ArcSwap};
 use nix::sys::socket::{MsgFlags, SockaddrIn};
 use once_cell::sync::Lazy;
 
 use crate::{VrrpV2Packet, ADVERT, CONFIG};
 
-static MULTICAST: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(false));
+static MULTICAST: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(true));
 
 pub struct Router {
     sock_fd: OwnedFd,
@@ -50,7 +50,7 @@ impl Router {
 
         thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(cloned_advert_int as u64));
-            if **MULTICAST.load() {
+            if *MULTICAST.load_full() {
                 send_advertisement(cloned_fd, advert_pkt.clone());
             };
         });
@@ -58,13 +58,15 @@ impl Router {
         // main router loop
         // TODO: Separate listening & advertising into different threads
         loop {
+            // Check
             let advert = ADVERT.load_full();
-            if advert.0 {
+            if advert.0 && advert.1.router_id == self.router_id {
                 println!("Router received VRRPv2 advertisement!");
                 println!("\tSource {}", Ipv4Addr::from(advert.1.ip_src));
                 println!("\tRouter Id {}", advert.1.router_id);
                 println!("\tPriority {}", advert.1.priority);
                 ADVERT.store(Arc::new((false, VrrpV2Packet::new())));
+                MULTICAST.store(Arc::new(!*MULTICAST.load_full()));
             }
             std::thread::sleep(std::time::Duration::from_millis(100 as u64));
 
@@ -83,9 +85,13 @@ impl Router {
         let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
         vip_addresses.push(self.virtual_ip);
 
-        let auth_data: [u8; 8] = [49, 49, 49, 49, 0, 0, 0, 0];
+        pkt_hdr.set_vip_addresses(&vip_addresses);
 
-        Some(pkt_hdr.to_bytes(&vip_addresses, &auth_data))
+        let auth_data = [49, 49, 49, 49, 0, 0, 0, 0].to_vec();
+
+        pkt_hdr.set_auth_data(&auth_data);
+
+        Some(pkt_hdr.to_bytes())
     }
 }
 
