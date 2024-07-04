@@ -13,11 +13,20 @@ use crate::{VrrpV2Packet, ADVERT, CONFIG};
 
 static MULTICAST: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(true));
 
+enum State {
+    Initialize,
+    Backup,
+    Master,
+}
+
 pub struct Router {
+    state: State,
     sock_fd: OwnedFd,
     router_id: u8,
     priority: u8,
     advert_int: u8,
+    master_down_int: u16,
+    preempt_mode: bool,
     virtual_ip: Ipv4Addr,
 }
 
@@ -25,10 +34,13 @@ impl Router {
     pub fn new(fd: OwnedFd) -> Router {
         let config = CONFIG.load_full();
         Router {
+            state: State::Initialize,
             sock_fd: fd,
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
+            master_down_int: 3 * config.advert_int as u16,
+            preempt_mode: false,
             virtual_ip: config.virtual_ip,
         }
     }

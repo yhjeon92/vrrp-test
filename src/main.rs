@@ -15,16 +15,12 @@ mod constants;
 mod router;
 use clap::Parser;
 use constants::{
-    AF_INET, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_VRRPV2, SOCKET_TTL,
-    SOCK_RAW,
+    AF_INET, AF_PACKET, ETH_P_ARP, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
+    IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW,
 };
 use nix::{
     libc::socket,
-    sys::socket::{
-        bind, recvfrom, setsockopt,
-        sockopt::{self},
-        IpMembershipRequest, SockaddrIn,
-    },
+    sys::socket::{bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, SockaddrIn},
 };
 use serde::{Deserialize, Serialize};
 
@@ -69,8 +65,25 @@ struct IOctlFlags {
     ifr_flags: i16,
 }
 
+// RFC 826
+struct ArpPacket {
+    mac_dst: [u8; 6],
+    mac_src: [u8; 6],
+    eth_proto: u16,
+
+    hw_type: u16,
+    proto_type: u16,
+    hw_len: u8,    // 6?
+    proto_len: u8, // 4?
+    op_code: u16,
+    hw_addr_src: [u8; 6],
+    proto_addr_src: [u8; 4],
+    hw_addr_dst: [u8; 6],
+    proto_addr_dst: [u8; 4],
+}
+
 #[derive(Deserialize, Debug)]
-struct VrrpV2Packet {
+pub struct VrrpV2Packet {
     // IPv4 Header Fields
     ip_ver: u8,
     ip_dscp: u8,
@@ -311,7 +324,7 @@ fn main() {
         },
     };
 
-    let sock_fd = match open_read_socket(&if_name) {
+    let sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
         Err(err) => {
             println!("[ERROR] while opening socket: {}", err.to_string());
@@ -320,8 +333,6 @@ fn main() {
     };
 
     println!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());
-
-    let mut pkt_buf: [u8; 1024] = [0; 1024];
 
     if args.router {
         let router = Router::new(match sock_fd.try_clone() {
@@ -341,86 +352,23 @@ fn main() {
         });
     }
 
+    let mut pkt_buf: [u8; 1024] = [0; 1024];
+
     loop {
         if args.router {
             // Router mode
-            // let packet = build_vrrpv2_packet();
-            // match packet {
-            //     Some(pkt) => {
-            //         println!("About to send a packet: ");
-            //         for pkt_byte in &pkt {
-            //             print!("{:02X} ", pkt_byte);
-            //         }
-            //         match nix::sys::socket::sendto(
-            //             sock_fd.as_raw_fd(),
-            //             &pkt.as_slice(),
-            //             &SockaddrIn::new(224, 0, 0, 18, 112),
-            //             MsgFlags::empty(),
-            //         ) {
-            //             Ok(size) => {
-            //                 println!("A VRRPV2 packet was sent! {}", size);
-            //             }
-            //             Err(err) => {
-            //                 println!(
-            //                     "An error was encountered while sending packet! {}",
-            //                     err.to_string()
-            //                 );
-            //             }
-            //         }
-            //     }
-            //     None => (),
-            // }
-            // std::thread::sleep(std::time::Duration::from_secs(3));
-            let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
-                Ok((pkt_len, sender_addr)) => {
-                    println!("Message of len {}", pkt_len);
-                    match sender_addr {
-                        Some(addr) => {
-                            println!("Sender Address {}", addr.ip().to_string());
-                        }
-                        None => {}
-                    };
-                    pkt_len
-                }
+
+            let vrrp_pkt = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
+                Ok(pkt) => pkt,
                 Err(err) => {
                     println!("[ERROR] {}", err.to_string());
-                    return;
+                    continue;
                 }
             };
 
-            // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
-            let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_big_endian()
-                .deserialize(&pkt_buf[0..28])
-                .unwrap();
-
-            for ind in 0..len {
-                print!("{:02X?} ", pkt_buf[ind as usize]);
-            }
-            print!("\n");
-
-            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-
-            for ind in 0..vrrp_pkt.cnt_ip_addr {
-                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
-                        .try_into()
-                        .unwrap(),
-                )));
-            }
-
-            vrrp_pkt.set_vip_addresses(&vip_addresses);
-
-            let auth_data =
-                pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
-
-            vrrp_pkt.set_auth_data(&auth_data);
-
             match vrrp_pkt.verify_checksum() {
                 Ok(_) => {
-                    // print_vrrpv2_packet(&vrrp_pkt, &vip_addresses, auth_data);
+                    // vrrp_pkt.print();
                     ADVERT.store(Arc::new((true, vrrp_pkt)));
                 }
                 Err(err) => {
@@ -429,52 +377,13 @@ fn main() {
             }
         } else {
             // ReadOnly mode
-            let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), &mut pkt_buf) {
-                Ok((pkt_len, sender_addr)) => {
-                    println!("Message of len {}", pkt_len);
-                    match sender_addr {
-                        Some(addr) => {
-                            println!("Sender Address {}", addr.ip().to_string());
-                        }
-                        None => {}
-                    };
-                    pkt_len
-                }
+            let vrrp_pkt = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
+                Ok(pkt) => pkt,
                 Err(err) => {
                     println!("[ERROR] {}", err.to_string());
-                    return;
+                    continue;
                 }
             };
-
-            // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
-            let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_big_endian()
-                .deserialize(&pkt_buf[0..28])
-                .unwrap();
-
-            for ind in 0..len {
-                print!("{:02X?} ", pkt_buf[ind as usize]);
-            }
-            print!("\n");
-
-            let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-
-            for ind in 0..vrrp_pkt.cnt_ip_addr {
-                vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-                    pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
-                        .try_into()
-                        .unwrap(),
-                )));
-            }
-
-            vrrp_pkt.set_vip_addresses(&vip_addresses);
-
-            let auth_data =
-                pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
-
-            vrrp_pkt.set_auth_data(&auth_data);
 
             match vrrp_pkt.verify_checksum() {
                 Ok(_) => {
@@ -488,7 +397,7 @@ fn main() {
     }
 }
 
-pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
+pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
     unsafe {
@@ -585,4 +494,71 @@ pub fn open_read_socket(if_name: &str) -> Result<OwnedFd, String> {
     }
 
     return Ok(sock_fd);
+}
+
+pub fn open_arp_socket() -> Result<OwnedFd, String> {
+    let sock_fd: OwnedFd;
+
+    unsafe {
+        // AddressFamily AF_PACKET 0x11, SocketType SOCK_RAW 0x03, Protocol ETH_P_ARP 0x0806 (2054; arp)
+        sock_fd = match socket(AF_PACKET, SOCK_RAW, ETH_P_ARP) {
+            -1 => {
+                return Err(format!(
+                    "Failed to open a raw socket - check the process privileges"
+                ));
+            }
+            fd => OwnedFd::from_raw_fd(fd),
+        };
+    }
+
+    return Ok(sock_fd);
+}
+
+fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
+    let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
+        Ok((pkt_len, sender_addr)) => {
+            println!("Message of len {}", pkt_len);
+            match sender_addr {
+                Some(addr) => {
+                    println!("Sender Address {}", addr.ip().to_string());
+                }
+                None => {}
+            };
+            pkt_len
+        }
+        Err(err) => {
+            return Err(format!("[ERROR] {}", err.to_string()));
+        }
+    };
+
+    // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+    let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_big_endian()
+        .deserialize(&pkt_buf[0..28])
+        .unwrap();
+
+    for ind in 0..len {
+        print!("{:02X?} ", pkt_buf[ind as usize]);
+    }
+    print!("\n");
+
+    let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+
+    for ind in 0..vrrp_pkt.cnt_ip_addr {
+        vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+            pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+                .try_into()
+                .unwrap(),
+        )));
+    }
+
+    vrrp_pkt.set_vip_addresses(&vip_addresses);
+
+    let auth_data = pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
+
+    vrrp_pkt.set_auth_data(&auth_data);
+
+    return Ok(vrrp_pkt);
 }
