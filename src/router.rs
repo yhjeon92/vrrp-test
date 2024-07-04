@@ -2,11 +2,16 @@ use std::{
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
+    thread,
 };
 
+use arc_swap::ArcSwap;
 use nix::sys::socket::{MsgFlags, SockaddrIn};
+use once_cell::sync::Lazy;
 
 use crate::{VrrpV2Packet, ADVERT, CONFIG};
+
+static MULTICAST: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(false));
 
 pub struct Router {
     sock_fd: OwnedFd,
@@ -30,6 +35,26 @@ impl Router {
 
     pub fn start(&self) {
         println!("Router thread running...");
+
+        let cloned_fd = self.sock_fd.as_raw_fd().clone();
+
+        let advert_pkt = match self.build_packet() {
+            Some(pkt) => pkt,
+            _ => {
+                println!("[ERROR] failed to build VRRP advertisement packet");
+                return;
+            }
+        };
+
+        let cloned_advert_int = self.advert_int.clone();
+
+        thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(cloned_advert_int as u64));
+            if **MULTICAST.load() {
+                send_advertisement(cloned_fd, advert_pkt.clone());
+            };
+        });
+
         // main router loop
         // TODO: Separate listening & advertising into different threads
         loop {
@@ -41,34 +66,9 @@ impl Router {
                 println!("\tPriority {}", advert.1.priority);
                 ADVERT.store(Arc::new((false, VrrpV2Packet::new())));
             }
-            std::thread::sleep(std::time::Duration::from_secs(self.advert_int as u64));
-            self.send_advertisement();
-        }
-    }
+            std::thread::sleep(std::time::Duration::from_millis(100 as u64));
 
-    fn send_advertisement(&self) {
-        match self.build_packet() {
-            Some(pkt_vec) => {
-                match nix::sys::socket::sendto(
-                    self.sock_fd.as_raw_fd(),
-                    &pkt_vec.as_slice(),
-                    &SockaddrIn::new(224, 0, 0, 18, 112),
-                    MsgFlags::empty(),
-                ) {
-                    Ok(size) => {
-                        println!("A VRRPV2 packet was sent! {}", size);
-                    }
-                    Err(err) => {
-                        println!(
-                            "An error was encountered while sending packet! {}",
-                            err.to_string()
-                        );
-                    }
-                }
-            }
-            _ => {
-                println!("[ERROR] Failed to send vrrpv2 advertisement");
-            }
+            // self.send_advertisement();
         }
     }
 
@@ -86,5 +86,24 @@ impl Router {
         let auth_data: [u8; 8] = [49, 49, 49, 49, 0, 0, 0, 0];
 
         Some(pkt_hdr.to_bytes(&vip_addresses, &auth_data))
+    }
+}
+
+pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
+    match nix::sys::socket::sendto(
+        sock_fd.as_raw_fd(),
+        &pkt_vec.as_slice(),
+        &SockaddrIn::new(224, 0, 0, 18, 112),
+        MsgFlags::empty(),
+    ) {
+        Ok(size) => {
+            println!("A VRRPV2 packet was sent! {}", size);
+        }
+        Err(err) => {
+            println!(
+                "An error was encountered while sending packet! {}",
+                err.to_string()
+            );
+        }
     }
 }
