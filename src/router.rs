@@ -129,11 +129,33 @@ impl Router {
                                     src_addr.to_string()
                                 );
 
-                                MASTER_HEALTHY.store(Arc::new(true));
+                                if router_id == self.router_id {
+                                    MASTER_HEALTHY.store(Arc::new(true));
 
-                                thread::spawn(move || start_master_down_timer(master_down_int, tx));
+                                    thread::spawn(move || {
+                                        start_master_down_timer(master_down_int, tx)
+                                    });
+                                }
                             }
-                            State::Master => {}
+                            State::Master => {
+                                if router_id == self.router_id {
+                                    if priority == 0 {
+                                        send_advertisement(sock_fd, advert_pkt.clone());
+                                        // Set advert timer to advert_int
+                                    } else if priority > self.priority {
+                                        // Stop advert timer
+                                        // Set master down timer
+                                        MASTER_HEALTHY.store(Arc::new(true));
+
+                                        thread::spawn(move || {
+                                            start_master_down_timer(master_down_int, tx)
+                                        });
+
+                                        // Transition to Backup
+                                        self.state = State::Backup;
+                                    }
+                                }
+                            }
                             _ => {}
                         },
                         Event::Startup => {
@@ -156,7 +178,20 @@ impl Router {
                             }
                         }
                         Event::AdvertTimeout => match self.state {
-                            State::Master => send_advertisement(sock_fd, advert_pkt.clone()),
+                            State::Master => {
+                                let advert_int_cloned = self.advert_int.clone();
+                                let sock_fd_cloned = sock_fd.clone();
+                                let pkt_vec = advert_pkt.clone();
+                                let tx = self.router_tx.clone();
+                                thread::spawn(move || {
+                                    start_advert_timer(
+                                        advert_int_cloned,
+                                        sock_fd_cloned,
+                                        pkt_vec,
+                                        tx,
+                                    )
+                                });
+                            }
                             _ => {
                                 // Discard
                             }
@@ -164,6 +199,23 @@ impl Router {
                         Event::MasterDown => match self.state {
                             State::Backup => {
                                 println!("MASTER DOWN!");
+                                // Multicast Advertisement
+                                // Broadcast Gratuitous ARP
+                                // Start advertisement timer
+                                let advert_int_cloned = self.advert_int.clone();
+                                let sock_fd_cloned = sock_fd.clone();
+                                let pkt_vec = advert_pkt.clone();
+
+                                thread::spawn(move || {
+                                    start_advert_timer(
+                                        advert_int_cloned,
+                                        sock_fd_cloned,
+                                        pkt_vec,
+                                        tx,
+                                    )
+                                });
+
+                                self.state = State::Master;
                             }
                             _ => {
                                 // TODO
@@ -228,6 +280,19 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
     }
 }
 
+fn start_timer(int: u64) {
+    let mut iter = 0;
+    loop {
+        thread::sleep(Duration::from_micros(int));
+        iter += 1;
+        if iter > 1000000 {
+            println!("a million iteration is reached");
+            iter = 0;
+        }
+        // Do things
+    }
+}
+
 pub fn start_master_down_timer(master_down_int: f32, tx: Sender<Event>) {
     thread::sleep(Duration::from_millis(
         (master_down_int * 1000 as f32) as u64,
@@ -237,6 +302,13 @@ pub fn start_master_down_timer(master_down_int: f32, tx: Sender<Event>) {
         println!("Master Unhealthy");
         _ = tx.blocking_send(Event::MasterDown);
     } else {
+        MASTER_HEALTHY.store(Arc::new(false));
         println!("Master Healthy, skipping..");
     }
+}
+
+pub fn start_advert_timer(advert_int: u8, sock_fd: i32, pkt_vec: Vec<u8>, tx: Sender<Event>) {
+    send_advertisement(sock_fd, pkt_vec);
+    thread::sleep(Duration::from_secs(advert_int as u64));
+    _ = tx.blocking_send(Event::AdvertTimeout);
 }
