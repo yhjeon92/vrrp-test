@@ -169,7 +169,6 @@ impl Router {
                                         // Set master down timer
                                         MASTER_HEALTHY.store(Arc::new(true));
 
-                                        // start_master_down_timer(master_down_int, tx);
                                         start_master_down_timer(
                                             self.master_down_int,
                                             self.router_tx.clone(),
@@ -211,17 +210,19 @@ impl Router {
                                             self.router_tx.clone(),
                                         );
 
+                                        // TODO: Set Virtual IP to an interface
+
                                         // Promote oneself to Master
                                         self.state = State::Master;
                                     } else {
                                         // Set Master Down Timer interval to MasterDownInterval
+                                        start_master_down_timer(
+                                            self.master_down_int,
+                                            self.router_tx.clone(),
+                                        );
+
                                         self.state = State::Backup;
                                     }
-
-                                    start_master_down_timer(
-                                        self.master_down_int,
-                                        self.router_tx.clone(),
-                                    );
                                 }
                                 _ => (),
                             }
@@ -260,6 +261,8 @@ impl Router {
                                     self.router_tx.clone(),
                                 );
 
+                                // TODO: Set Virtual IP to an interface
+
                                 println!("Master down interval expired. Transitioning to MASTER state...");
                                 self.state = State::Master;
                             }
@@ -275,7 +278,6 @@ impl Router {
                             State::Master => {}
                             _ => {}
                         },
-                        _ => {}
                     };
                 }
                 _ => {

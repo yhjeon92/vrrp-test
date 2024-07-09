@@ -5,12 +5,12 @@ pub const AF_PACKET: i32 = 0x11;
 
 pub const SOCK_RAW: i32 = 0x03;
 
-pub const IPPROTO_ICMP: i32 = 0x01;
-pub const IPPROTO_ICMPV6: i32 = 0x3A;
-pub const IPPROTO_TCP: i32 = 6;
-pub const IPPROTO_UDP: i32 = 0x11;
-pub const IPPROTO_IP: i32 = 0x00;
-pub const IPPROTO_IPV6: i32 = 0x29;
+pub const _IPPROTO_ICMP: i32 = 0x01;
+pub const _IPPROTO_ICMPV6: i32 = 0x3A;
+pub const _IPPROTO_TCP: i32 = 6;
+pub const _IPPROTO_UDP: i32 = 0x11;
+pub const _IPPROTO_IP: i32 = 0x00;
+pub const _IPPROTO_IPV6: i32 = 0x29;
 pub const IPPROTO_VRRPV2: i32 = 0x70;
 // ARP 2054
 pub const ETH_PROTO_ARP: i32 = 0x0806;

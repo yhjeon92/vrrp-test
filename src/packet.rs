@@ -70,16 +70,16 @@ impl GarpPacket {
 #[derive(Deserialize, Debug)]
 pub struct VrrpV2Packet {
     // IPv4 Header Fields
-    ip_ver: u8,
-    ip_dscp: u8,
-    ip_length: u16,
-    ip_id: u16,
-    ip_flags: u16,
+    _ip_ver: u8,
+    _ip_dscp: u8,
+    _ip_length: u16,
+    _ip_id: u16,
+    _ip_flags: u16,
     ip_ttl: u8,
-    ip_proto: u8,
-    ip_checksum: u16,
+    _ip_proto: u8,
+    _ip_checksum: u16,
     pub ip_src: [u8; 4],
-    pub ip_dst: [u8; 4],
+    pub _ip_dst: [u8; 4],
 
     // VRRPV2 Packet Fields
     // Version (4-bits; 2 for vrrpv2, 3 for vrrpv3) + Type (4-bits; vrrp advertisement must be represented by 1)
@@ -100,16 +100,16 @@ pub struct VrrpV2Packet {
 impl VrrpV2Packet {
     pub fn new() -> VrrpV2Packet {
         VrrpV2Packet {
-            ip_ver: 0x45,
-            ip_dscp: 0xC0,
-            ip_length: 0,
-            ip_id: 0,
-            ip_flags: 0,
+            _ip_ver: 0x45,
+            _ip_dscp: 0xC0,
+            _ip_length: 0,
+            _ip_id: 0,
+            _ip_flags: 0,
             ip_ttl: SOCKET_TTL,
-            ip_proto: IPPROTO_VRRPV2 as u8,
-            ip_checksum: 0,
+            _ip_proto: IPPROTO_VRRPV2 as u8,
+            _ip_checksum: 0,
             ip_src: [0, 0, 0, 0],
-            ip_dst: VRRP_MCAST_ADDR.octets(),
+            _ip_dst: VRRP_MCAST_ADDR.octets(),
             ver_type: 0x21,
             router_id: 0,
             priority: 0,
