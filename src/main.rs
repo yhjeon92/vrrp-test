@@ -3,7 +3,7 @@ use bincode::Options;
 use once_cell::sync::Lazy;
 use packet::VrrpV2Packet;
 use router::{Event, Router};
-use socket::open_advertisement_socket;
+use socket::{open_advertisement_socket, open_arp_socket};
 use std::{
     convert::TryInto,
     fs::File,
@@ -66,8 +66,6 @@ struct IOctlFlags {
 }
 
 static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::from_pointee(Config::dummy()));
-static ADVERT: Lazy<ArcSwap<(bool, VrrpV2Packet)>> =
-    Lazy::new(|| ArcSwap::from_pointee((false, VrrpV2Packet::new())));
 
 fn main() {
     let args = Args::parse();
@@ -140,7 +138,16 @@ fn main() {
     if args.router {
         let (tx, rx) = mpsc::channel::<Event>(mem::size_of::<Event>());
 
-        let mut router = Router::new(
+        let arp_sock_fd = match open_arp_socket(&if_name) {
+            Ok(fd) => fd,
+            Err(err) => {
+                println!("[ERROR] while opening arp socket: {}", err.to_string());
+                return;
+            }
+        };
+
+        let mut router = match Router::new(
+            if_name,
             match sock_fd.try_clone() {
                 Ok(cloned_fd) => cloned_fd,
                 Err(err) => {
@@ -152,9 +159,16 @@ fn main() {
                     return;
                 }
             },
+            arp_sock_fd,
             tx.clone(),
             rx,
-        );
+        ) {
+            Ok(router) => router,
+            Err(err) => {
+                println!("[ERROR] failed to initialize a router: {}", err);
+                return;
+            }
+        };
 
         thread::spawn(move || {
             router.start();
@@ -178,7 +192,6 @@ fn main() {
             match vrrp_pkt.verify_checksum() {
                 Ok(_) => {
                     // vrrp_pkt.print();
-                    ADVERT.store(Arc::new((true, vrrp_pkt)));
 
                     match tx.blocking_send(Event::AdvertReceived(
                         router_id,

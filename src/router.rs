@@ -1,23 +1,26 @@
 use core::fmt;
 use std::{
-    borrow::Borrow,
-    convert::TryInto,
     net::Ipv4Addr,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use arc_swap::ArcSwap;
-use nix::sys::socket::{MsgFlags, SockaddrIn};
-use once_cell::sync::Lazy;
-use tokio::{
-    sync::mpsc::{Receiver, Sender},
-    time::{interval, Interval},
+use nix::{
+    libc::{sockaddr, sockaddr_ll},
+    sys::socket::{sockopt, LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
+    NixPath,
 };
+use once_cell::sync::Lazy;
+use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{VrrpV2Packet, ADVERT, CONFIG};
+use crate::{
+    constants::{AF_PACKET, ETH_PROTO_ARP},
+    packet::GarpPacket,
+    VrrpV2Packet, CONFIG,
+};
 
 pub enum State {
     Initialize,
@@ -58,11 +61,12 @@ impl fmt::Display for Event {
 }
 
 static MASTER_HEALTHY: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(false));
-static ADVERT_EXPIRED: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(true));
 
 pub struct Router {
     state: State,
+    if_name: String,
     sock_fd: OwnedFd,
+    arp_sock_fd: OwnedFd,
     router_id: u8,
     priority: u8,
     advert_int: u8,
@@ -75,30 +79,36 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(fd: OwnedFd, tx: Sender<Event>, rx: Receiver<Event>) -> Router {
+    pub fn new(
+        if_name: String,
+        advert_sock_fd: OwnedFd,
+        arp_sock_fd: OwnedFd,
+        tx: Sender<Event>,
+        rx: Receiver<Event>,
+    ) -> Result<Router, String> {
         let config = CONFIG.load_full();
 
-        Router {
+        Ok(Router {
             state: State::Initialize,
-            sock_fd: fd,
+            if_name: if_name,
+            sock_fd: advert_sock_fd,
+            arp_sock_fd: arp_sock_fd,
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
             master_down_int: (3 as f32 * config.advert_int as f32)
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
-            preempt_mode: false,
+            preempt_mode: true,
             virtual_ip: config.virtual_ip,
             router_tx: tx,
             router_rx: rx,
-        }
+        })
     }
 
     // RFC 3768 Protocol State Machine
     pub fn start(&mut self) {
         println!("Router thread running...");
-
-        let sock_fd = self.sock_fd.as_raw_fd().clone();
 
         let advert_pkt = match self.build_packet() {
             Some(pkt) => pkt.clone(),
@@ -127,15 +137,23 @@ impl Router {
                                 );
 
                                 if router_id == self.router_id {
-                                    MASTER_HEALTHY.store(Arc::new(true));
+                                    if priority == 0 {
+                                        MASTER_HEALTHY.store(Arc::new(false));
 
-                                    // thread::spawn(move || {
-                                    //     start_master_down_timer(master_down_int, tx)
-                                    // });
-                                    start_master_down_timer(
-                                        self.master_down_int,
-                                        self.router_tx.clone(),
-                                    );
+                                        start_master_down_timer(
+                                            self.skew_time,
+                                            self.router_tx.clone(),
+                                        );
+                                    } else {
+                                        if !self.preempt_mode || priority >= self.priority {
+                                            MASTER_HEALTHY.store(Arc::new(true));
+
+                                            start_master_down_timer(
+                                                self.master_down_int,
+                                                self.router_tx.clone(),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             State::Master => {
@@ -174,10 +192,30 @@ impl Router {
                                 State::Initialize => {
                                     // Do things..
                                     if self.priority == 255 {
+                                        // Multicast Advertisement
                                         send_advertisement(
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
                                         );
+
+                                        // Broadcast Gratuitous ARP
+                                        send_gratuitous_arp(
+                                            self.arp_sock_fd.as_raw_fd(),
+                                            self.if_name.clone(),
+                                            self.router_id,
+                                            self.virtual_ip,
+                                        );
+
+                                        // Start advertisement timer
+                                        start_advert_timer(
+                                            self.advert_int,
+                                            self.sock_fd.as_raw_fd(),
+                                            advert_pkt.clone(),
+                                            self.router_tx.clone(),
+                                        );
+
+                                        // Promote oneself to Master
+                                        self.state = State::Master;
                                     } else {
                                         // Set Master Down Timer interval to MasterDownInterval
                                         self.state = State::Backup;
@@ -196,14 +234,6 @@ impl Router {
                         }
                         Event::AdvertTimeout => match self.state {
                             State::Master => {
-                                // thread::spawn(move || {
-                                //     start_advert_timer(
-                                //         advert_int_cloned,
-                                //         sock_fd_cloned,
-                                //         pkt_vec,
-                                //         tx,
-                                //     )
-                                // });
                                 start_advert_timer(
                                     self.advert_int,
                                     self.sock_fd.as_raw_fd(),
@@ -219,17 +249,17 @@ impl Router {
                             State::Backup => {
                                 println!("MASTER DOWN!");
                                 // Multicast Advertisement
-                                // Broadcast Gratuitous ARP
-                                // Start advertisement timer
+                                send_advertisement(self.sock_fd.as_raw_fd(), advert_pkt.clone());
 
-                                // thread::spawn(move || {
-                                //     start_advert_timer(
-                                //         advert_int_cloned,
-                                //         sock_fd_cloned,
-                                //         pkt_vec,
-                                //         tx,
-                                //     )
-                                // });
+                                // Broadcast Gratuitous ARP
+                                send_gratuitous_arp(
+                                    self.arp_sock_fd.as_raw_fd(),
+                                    self.if_name.clone(),
+                                    self.router_id,
+                                    self.virtual_ip,
+                                );
+
+                                // Start advertisement timer
                                 start_advert_timer(
                                     self.advert_int,
                                     self.sock_fd.as_raw_fd(),
@@ -302,24 +332,129 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
     }
 }
 
-fn start_timer(int: u64) {
-    let mut iter = 0;
-    loop {
-        thread::sleep(Duration::from_micros(int));
-        iter += 1;
-        if iter > 1000000 {
-            println!("a million iteration is reached");
-            iter = 0;
+pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual_ip: Ipv4Addr) {
+    let mut pkt = GarpPacket::new(virtual_ip, router_id);
+
+    // match nix::sys::socket::send(
+    //     sock_fd.as_raw_fd(),
+    //     &pkt.to_bytes().as_slice(),
+    //     MsgFlags::empty(),
+    // ) {
+    //     Ok(size) => {
+    //         println!("Sent a GARP of len {}", size);
+    //     }
+    //     Err(err) => {
+    //         println!(
+    //             "An error was encountered while sending GARP request! {}",
+    //             err.to_string(),
+    //         );
+    //     }
+    // }
+
+    unsafe {
+        println!("interface {} len {}", if_name, if_name.len());
+
+        let if_index = match nix::net::if_::if_nameindex() {
+            Ok(ifs) => {
+                let mut index: i32 = -1;
+                for interface in ifs.iter() {
+                    let if_name_target = match interface.name().to_str() {
+                        Ok(name) => name,
+                        Err(err) => {
+                            println!("Error.. {}", err.to_string());
+                            return;
+                        }
+                    };
+
+                    println!(
+                        "Interface {} Len {}",
+                        if_name_target,
+                        interface.name().len()
+                    );
+
+                    if if_name.eq(if_name_target) {
+                        index = interface.index() as i32;
+                        println!("Found interface {}", if_name);
+                        break;
+                    }
+                }
+
+                match index {
+                    -1 => {
+                        println!("Error..");
+                        return;
+                    }
+                    ind => ind as usize,
+                }
+            }
+            Err(err) => {
+                println!("[ERROR] {}", err.to_string());
+                return;
+            }
+        };
+
+        println!("IF_INDEX {}", if_index);
+
+        let mut sock_addr = nix::libc::sockaddr_ll {
+            sll_family: AF_PACKET as u16,
+            sll_protocol: ETH_PROTO_ARP as u16,
+            sll_ifindex: if_index as i32,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8],
+        };
+
+        let ptr_sockaddr = core::mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sock_addr);
+
+        // LinkAddr::from_raw(&mut sock_addr as *const sockaddr, None);
+        // let sock_addr = match LinkAddr::from_raw(&mut sockaddr as *const sockaddr, None) {
+        let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
+            Some(addr) => addr,
+            None => {
+                return;
+            }
+        };
+
+        match nix::sys::socket::sendto(
+            sock_fd.as_raw_fd(),
+            &pkt.to_bytes().as_slice(),
+            &sock_addr,
+            MsgFlags::empty(),
+        ) {
+            Ok(size) => {
+                println!("Sent a GARP of len {}", size);
+            }
+            Err(err) => {
+                println!(
+                    "An error was encountered while sending GARP request! {}",
+                    err.to_string()
+                );
+            }
         }
-        // Do things
     }
+
+    // match nix::sys::socket::sendto(
+    //     sock_fd.as_raw_fd(),
+    //     &pkt.to_bytes().as_slice(),
+    //     &SockaddrIn::new(0, 0, 0, 0, 0),
+    //     MsgFlags::empty(),
+    // ) {
+    //     Ok(size) => {
+    //         println!("Sent a GARP of len {}", size);
+    //     }
+    //     Err(err) => {
+    //         println!(
+    //             "An error was encountered while sending GARP request! {}",
+    //             err.to_string()
+    //         );
+    //     }
+    // }
 }
 
-pub fn start_master_down_timer(master_down_int: f32, tx: Sender<Event>) {
+pub fn start_master_down_timer(interval: f32, tx: Sender<Event>) {
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(
-            (master_down_int * 1000 as f32) as u64,
-        ));
+        thread::sleep(Duration::from_millis((interval * 1000 as f32) as u64));
 
         if !**MASTER_HEALTHY.load() {
             println!("Master Unhealthy");

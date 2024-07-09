@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
@@ -12,7 +13,9 @@ use crate::{
 };
 use nix::{
     libc::socket,
-    sys::socket::{bind, setsockopt, sockopt, IpMembershipRequest, SockaddrIn},
+    sys::socket::{
+        self, bind, setsockopt, sockopt, IpMembershipRequest, SockFlag, SockProtocol, SockaddrIn,
+    },
 };
 
 pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
@@ -30,22 +33,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         };
     }
 
-    // // if_nametoindex는 1-인덱싱, iter().nth()는 0-인덱싱
-    // let if_ind = match nix::net::if_::if_nametoindex(if_name) {
-    //     Ok(ind) => ind - 1,
-    //     Err(_) => {
-    //         return Err(format!("No interface named {}", if_name));
-    //     }
-    // };
-
     let interfaces = nix::net::if_::if_nameindex().unwrap();
-
-    // let interface = match interfaces.iter().nth(if_ind as usize) {
-    //     Some(net_if) => net_if,
-    //     None => {
-    //         return Err(format!("No interface named {}", if_name));
-    //     }
-    // };
 
     let mut if_found = false;
 
@@ -124,6 +112,17 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Failed to bind advert socket to interface {}: {}",
+                if_name,
+                err.to_string()
+            ));
+        }
+    }
+
     let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
 
     match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
@@ -146,19 +145,55 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
     return Ok(sock_fd);
 }
 
-pub fn open_arp_socket() -> Result<OwnedFd, String> {
-    let sock_fd: OwnedFd;
+pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
+    // let sock_fd: OwnedFd;
 
-    unsafe {
-        // AddressFamily AF_PACKET 0x11, SocketType SOCK_RAW 0x03, Protocol ETH_PROTO_ARP 0x0806 (2054; arp)
-        sock_fd = match socket(AF_PACKET, SOCK_RAW, ETH_PROTO_ARP) {
-            -1 => {
-                return Err(format!(
-                    "Failed to open a raw socket - check the process privileges"
-                ));
-            }
-            fd => OwnedFd::from_raw_fd(fd),
-        };
+    // unsafe {
+    //     // AddressFamily AF_PACKET 0x11, SocketType SOCK_RAW 0x03, Protocol ETH_PROTO_ARP 0x0806 (2054; arp)
+    //     // sock_fd = match socket(AF_PACKET, SOCK_RAW, ETH_PROTO_ARP) {
+    //     //     -1 => {
+    //     //         return Err(format!(
+    //     //             "Failed to open a raw socket - check the process privileges"
+    //     //         ));
+    //     //     }
+    //     //     fd => OwnedFd::from_raw_fd(fd),
+    //     // };
+    // }
+
+    let sock_fd = match nix::sys::socket::socket(
+        socket::AddressFamily::Packet,
+        socket::SockType::Raw,
+        SockFlag::empty(),
+        SockProtocol::EthAll,
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(format!(
+                "Failed to open a raw socket - check the process privileges {}",
+                err.to_string()
+            ));
+        }
+    };
+
+    match setsockopt(&sock_fd, sockopt::Broadcast, &true) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while setting Broadcast option for socket: {}",
+                err
+            ));
+        }
+    };
+
+    match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Failed to bind advert socket to interface {}: {}",
+                if_name,
+                err.to_string()
+            ));
+        }
     }
 
     return Ok(sock_fd);

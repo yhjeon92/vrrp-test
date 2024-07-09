@@ -24,8 +24,8 @@ pub struct GarpPacket {
 }
 
 impl GarpPacket {
-    pub fn new(virtual_ip: Ipv4Addr) -> GarpPacket {
-        GarpPacket {
+    pub fn new(virtual_ip: Ipv4Addr, router_id: u8) -> GarpPacket {
+        let mut packet = GarpPacket {
             mac_dst: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
             mac_src: VIRTUAL_ROUTER_MAC,
             eth_proto: ETH_PROTO_ARP as u16,
@@ -38,7 +38,32 @@ impl GarpPacket {
             proto_addr_src: virtual_ip.octets(),
             hw_addr_dst: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
             proto_addr_dst: virtual_ip.octets(),
-        }
+        };
+
+        packet.mac_src[5] = router_id;
+        packet.hw_addr_src[5] = router_id;
+
+        packet
+    }
+
+    pub fn to_bytes(&mut self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+
+        bytes.extend_from_slice(&self.mac_dst);
+        bytes.extend_from_slice(&self.mac_src);
+
+        bytes.extend_from_slice(&self.eth_proto.to_be_bytes());
+        bytes.extend_from_slice(&self.hw_type.to_be_bytes());
+        bytes.extend_from_slice(&self.proto_type.to_be_bytes());
+        bytes.push(self.hw_len);
+        bytes.push(self.proto_len);
+        bytes.extend_from_slice(&self.op_code.to_be_bytes());
+        bytes.extend_from_slice(&self.hw_addr_src);
+        bytes.extend_from_slice(&self.proto_addr_src);
+        bytes.extend_from_slice(&self.hw_addr_dst);
+        bytes.extend_from_slice(&self.proto_addr_dst);
+
+        return bytes;
     }
 }
 
