@@ -6,7 +6,7 @@ use std::{
 use crate::{
     constants::{
         AF_INET, AF_PACKET, ETH_PROTO_ARP, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
-        IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW,
+        IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     IOctlFlags,
 };
@@ -30,20 +30,44 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         };
     }
 
-    // if_nametoindex는 1-인덱싱, iter().nth()는 0-인덱싱
-    let if_ind = match nix::net::if_::if_nametoindex(if_name) {
-        Ok(ind) => ind - 1,
-        Err(_) => {
-            return Err(format!("No interface named {}", if_name));
-        }
-    };
+    // // if_nametoindex는 1-인덱싱, iter().nth()는 0-인덱싱
+    // let if_ind = match nix::net::if_::if_nametoindex(if_name) {
+    //     Ok(ind) => ind - 1,
+    //     Err(_) => {
+    //         return Err(format!("No interface named {}", if_name));
+    //     }
+    // };
 
     let interfaces = nix::net::if_::if_nameindex().unwrap();
-    let interface = interfaces.iter().nth(if_ind as usize).unwrap();
+
+    // let interface = match interfaces.iter().nth(if_ind as usize) {
+    //     Some(net_if) => net_if,
+    //     None => {
+    //         return Err(format!("No interface named {}", if_name));
+    //     }
+    // };
+
+    let mut if_found = false;
+
+    for interface in interfaces.iter() {
+        match interface.name().to_str() {
+            Ok(name) => {
+                if name == if_name {
+                    if_found = true;
+                    break;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    if !if_found {
+        return Err(format!("No interface named {}", if_name));
+    }
 
     let ifname_slice = &mut [0u8; 16];
 
-    for (i, b) in interface.name().to_bytes().iter().enumerate() {
+    for (i, b) in if_name.as_bytes().iter().enumerate() {
         ifname_slice[i] = *b;
     }
 
@@ -63,10 +87,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCSIFFLAGS, &mut if_opts);
         if res < 0 {
             println!("{}", std::io::Error::last_os_error().to_string());
-            return Err(format!(
-                "Cannot manipulate network interface {}",
-                interface.name().to_string_lossy()
-            ));
+            return Err(format!("Cannot manipulate network interface {}", if_name));
         }
     }
 
@@ -103,10 +124,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
-    let ip_mreq = IpMembershipRequest::new(
-        Ipv4Addr::new(224, 0, 0, 18),
-        Some(Ipv4Addr::new(0, 0, 0, 0)),
-    );
+    let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
 
     match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
         Ok(_) => {}
@@ -115,7 +133,10 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
-    match bind(sock_fd.as_raw_fd(), &SockaddrIn::new(224, 0, 0, 18, 112)) {
+    match bind(
+        sock_fd.as_raw_fd(),
+        &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
+    ) {
         Ok(_) => {}
         Err(err) => {
             return Err(format!("Binding socket failed: {}", err));

@@ -6,6 +6,8 @@
 
 ```shell
 $ cargo build
+
+$ cargo build --release
 ```
 
 #### Run
@@ -17,3 +19,13 @@ $ sudo vrrp-test -i $TARGET_INTERFACE
 # Run in router mode (Send VRRPv2 advertisement packet periodically)
 $ sudo vrrp-test -i $TARGET_INTERFACE -r
 ```
+
+- Specify configuration file path with command line option -c
+
+```shell
+$ sudo vrrp-test -i $TARGET_INTERFACE -c $CONFIG_FILE_PATH
+```
+
+#### Configuration
+
+- vrrp.toml

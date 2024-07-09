@@ -33,8 +33,8 @@ struct Args {
     /// Option to run in Virtual Router mode, defaults to false. Multicast advertise packet if set, otherwise just print received VRRPv2 packet on the specified interface.
     #[arg(short, default_value_t = false)]
     router: bool,
-    /// Path to the virtual router config file, defaults to vrrp-test.toml in working dir. Required for Virtual Router mode only.
-    #[arg(short, default_value_t = String::from("vrrp-test.toml"))]
+    /// Path to the virtual router config file, defaults to vrrp.toml in working dir. Required for Virtual Router mode only.
+    #[arg(short, default_value_t = String::from("vrrp.toml"))]
     config_file_path: String,
 }
 

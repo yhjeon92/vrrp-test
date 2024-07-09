@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 pub const AF_INET: i32 = 0x02;
 pub const AF_PACKET: i32 = 0x11;
 
@@ -19,6 +21,8 @@ pub const IFR_FLAG_RUNNING: i16 = 0x40;
 pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
 
 pub const SOCKET_TTL: u8 = 0xFF;
+
+pub const VRRP_MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 18);
 
 pub const VIRTUAL_ROUTER_MAC: [u8; 6] = [0, 0, 94, 0, 1, 0];
 

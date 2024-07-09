@@ -2,7 +2,9 @@ use std::{convert::TryInto, net::Ipv4Addr};
 
 use serde::Deserialize;
 
-use crate::constants::{ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, SOCKET_TTL, VIRTUAL_ROUTER_MAC};
+use crate::constants::{
+    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR,
+};
 
 // RFC 826
 pub struct GarpPacket {
@@ -82,7 +84,7 @@ impl VrrpV2Packet {
             ip_proto: 0x70,
             ip_checksum: 0,
             ip_src: [0, 0, 0, 0],
-            ip_dst: [224, 0, 0, 18],
+            ip_dst: VRRP_MCAST_ADDR.octets(),
             ver_type: 0x21,
             router_id: 0,
             priority: 0,
