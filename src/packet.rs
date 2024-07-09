@@ -3,7 +3,7 @@ use std::{convert::TryInto, net::Ipv4Addr};
 use serde::Deserialize;
 
 use crate::constants::{
-    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR,
+    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR
 };
 
 // RFC 826
@@ -106,7 +106,7 @@ impl VrrpV2Packet {
             ip_id: 0,
             ip_flags: 0,
             ip_ttl: SOCKET_TTL,
-            ip_proto: 0x70,
+            ip_proto: IPPROTO_VRRPV2 as u8,
             ip_checksum: 0,
             ip_src: [0, 0, 0, 0],
             ip_dst: VRRP_MCAST_ADDR.octets(),
@@ -165,18 +165,13 @@ impl VrrpV2Packet {
         bytes.push(self.auth_type);
         bytes.push(self.advert_int);
 
-        bytes.push((self.checksum >> 8) as u8);
-        bytes.push(self.checksum as u8);
+        bytes.extend_from_slice(&self.checksum.to_be_bytes());
 
         for address in self.vip_addresses.clone().into_iter() {
-            for address_byte in address.octets() {
-                bytes.push(address_byte);
-            }
+            bytes.extend_from_slice(&address.octets());
         }
 
-        for auth_data_byte in self.auth_data.clone().into_iter() {
-            bytes.push(auth_data_byte);
-        }
+        bytes.extend_from_slice(&self.auth_data);
 
         return bytes;
     }

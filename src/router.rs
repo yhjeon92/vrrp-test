@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{
     net::Ipv4Addr,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
     thread,
     time::Duration,
@@ -10,7 +10,7 @@ use std::{
 use arc_swap::ArcSwap;
 use nix::{
     libc::{sockaddr, sockaddr_ll},
-    sys::socket::{sockopt, LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
+    sys::socket::{LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
     NixPath,
 };
 use once_cell::sync::Lazy;
@@ -169,10 +169,6 @@ impl Router {
                                         // Set master down timer
                                         MASTER_HEALTHY.store(Arc::new(true));
 
-                                        // thread::spawn(move || {
-                                        //     start_master_down_timer(master_down_int, tx)
-                                        // });
-
                                         // start_master_down_timer(master_down_int, tx);
                                         start_master_down_timer(
                                             self.master_down_int,
@@ -180,6 +176,7 @@ impl Router {
                                         );
 
                                         // Transition to Backup
+                                        println!("Advertisement of priority {} received from src {}, transitioning to BACKUP state...", priority, src_addr.to_string());
                                         self.state = State::Backup;
                                     }
                                 }
@@ -221,9 +218,6 @@ impl Router {
                                         self.state = State::Backup;
                                     }
 
-                                    // thread::spawn(move || {
-                                    //     start_master_down_timer(master_down_int, tx)
-                                    // });
                                     start_master_down_timer(
                                         self.master_down_int,
                                         self.router_tx.clone(),
@@ -247,7 +241,6 @@ impl Router {
                         },
                         Event::MasterDown => match self.state {
                             State::Backup => {
-                                println!("MASTER DOWN!");
                                 // Multicast Advertisement
                                 send_advertisement(self.sock_fd.as_raw_fd(), advert_pkt.clone());
 
@@ -267,6 +260,7 @@ impl Router {
                                     self.router_tx.clone(),
                                 );
 
+                                println!("Master down interval expired. Transitioning to MASTER state...");
                                 self.state = State::Master;
                             }
                             _ => {
@@ -320,9 +314,7 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
         &SockaddrIn::new(224, 0, 0, 18, 112),
         MsgFlags::empty(),
     ) {
-        Ok(size) => {
-            println!("A VRRPV2 packet was sent! {}", size);
-        }
+        Ok(_) => {}
         Err(err) => {
             println!(
                 "An error was encountered while sending packet! {}",
@@ -334,22 +326,6 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
 
 pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual_ip: Ipv4Addr) {
     let mut pkt = GarpPacket::new(virtual_ip, router_id);
-
-    // match nix::sys::socket::send(
-    //     sock_fd.as_raw_fd(),
-    //     &pkt.to_bytes().as_slice(),
-    //     MsgFlags::empty(),
-    // ) {
-    //     Ok(size) => {
-    //         println!("Sent a GARP of len {}", size);
-    //     }
-    //     Err(err) => {
-    //         println!(
-    //             "An error was encountered while sending GARP request! {}",
-    //             err.to_string(),
-    //         );
-    //     }
-    // }
 
     unsafe {
         println!("interface {} len {}", if_name, if_name.len());
@@ -407,11 +383,10 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
 
         let ptr_sockaddr = core::mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sock_addr);
 
-        // LinkAddr::from_raw(&mut sock_addr as *const sockaddr, None);
-        // let sock_addr = match LinkAddr::from_raw(&mut sockaddr as *const sockaddr, None) {
         let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
             Some(addr) => addr,
             None => {
+                println!("[ERROR] failed to instantiate sockaddr");
                 return;
             }
         };
@@ -433,23 +408,6 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
             }
         }
     }
-
-    // match nix::sys::socket::sendto(
-    //     sock_fd.as_raw_fd(),
-    //     &pkt.to_bytes().as_slice(),
-    //     &SockaddrIn::new(0, 0, 0, 0, 0),
-    //     MsgFlags::empty(),
-    // ) {
-    //     Ok(size) => {
-    //         println!("Sent a GARP of len {}", size);
-    //     }
-    //     Err(err) => {
-    //         println!(
-    //             "An error was encountered while sending GARP request! {}",
-    //             err.to_string()
-    //         );
-    //     }
-    // }
 }
 
 pub fn start_master_down_timer(interval: f32, tx: Sender<Event>) {

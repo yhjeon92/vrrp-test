@@ -111,7 +111,6 @@ fn main() {
     };
 
     let if_name = match args.router {
-        // true => CONFIG.load_full().interface.clone(),
         true => CONFIG.load_full().interface.clone(),
         false => match args.interface.is_empty() {
             true => {

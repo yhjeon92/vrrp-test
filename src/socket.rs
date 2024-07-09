@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     constants::{
-        AF_INET, AF_PACKET, ETH_PROTO_ARP, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
+        AF_INET, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
         IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     IOctlFlags,
@@ -79,6 +79,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    // SOL_SOCKET, SO_REUSEADDR
     match setsockopt(&sock_fd, sockopt::ReuseAddr, &true) {
         Ok(_) => {}
         Err(err) => {
@@ -90,6 +91,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    // IPPROTO_IP, IP_MULTICAST_LOOP
     match setsockopt(&sock_fd, sockopt::IpMulticastLoop, &false) {
         Ok(_) => {}
         Err(err) => {
@@ -101,6 +103,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    // IPPROTO_IP, IP_MULTICAST_TTL
     match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &SOCKET_TTL) {
         Ok(_) => {}
         Err(err) => {
@@ -112,6 +115,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
+    // SOL_SOCKET, SO_BINDTODEVICE
     match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
         Ok(_) => {}
         Err(err) => {
@@ -125,6 +129,7 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
 
     let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
 
+    // IPPROTO_IP, IP_ADD_MEMBERSHIP
     match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
         Ok(_) => {}
         Err(err) => {
@@ -146,20 +151,6 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
 }
 
 pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
-    // let sock_fd: OwnedFd;
-
-    // unsafe {
-    //     // AddressFamily AF_PACKET 0x11, SocketType SOCK_RAW 0x03, Protocol ETH_PROTO_ARP 0x0806 (2054; arp)
-    //     // sock_fd = match socket(AF_PACKET, SOCK_RAW, ETH_PROTO_ARP) {
-    //     //     -1 => {
-    //     //         return Err(format!(
-    //     //             "Failed to open a raw socket - check the process privileges"
-    //     //         ));
-    //     //     }
-    //     //     fd => OwnedFd::from_raw_fd(fd),
-    //     // };
-    // }
-
     let sock_fd = match nix::sys::socket::socket(
         socket::AddressFamily::Packet,
         socket::SockType::Raw,
@@ -175,6 +166,7 @@ pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     };
 
+    // SOL_SOCKET, SO_BROADCAST
     match setsockopt(&sock_fd, sockopt::Broadcast, &true) {
         Ok(_) => {}
         Err(err) => {
@@ -185,6 +177,7 @@ pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     };
 
+    // SOL_SOCKET, SO_BINDTODEVICE
     match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
         Ok(_) => {}
         Err(err) => {
