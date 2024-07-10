@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 
 pub const AF_INET: i32 = 0x02;
+pub const AF_NETLINK: u16 = 0x10;
 pub const AF_PACKET: i32 = 0x11;
 
 pub const SOCK_RAW: i32 = 0x03;
@@ -19,6 +20,20 @@ pub const ETH_PROTO_IP: i32 = 0x0800;
 pub const IFR_FLAG_UP: i16 = 0x01;
 pub const IFR_FLAG_RUNNING: i16 = 0x40;
 pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
+
+// Message Types
+pub const RTM_NEWADDR: u16 = 0x14;
+
+// NetLink Message Flags
+pub const NLM_F_REQUEST: u16 = 0x01;
+pub const NLM_F_MULTI: u16 = 0x02;
+pub const NLM_F_ACK: u16 = 0x04;
+pub const NLM_F_EXCL: u16 = 0x200;
+pub const NLM_F_CREATE: u16 = 0x400;
+
+pub const IFA_ADDRESS: u8 = 1;
+pub const IFA_LOCAL: u8 = 2;
+pub const IFA_LABEL: u8 = 3;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 

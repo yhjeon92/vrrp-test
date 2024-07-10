@@ -6,15 +6,17 @@ use std::{
 
 use crate::{
     constants::{
-        AF_INET, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
-        IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
+        AF_INET, AF_NETLINK, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_VRRPV2,
+        SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
     },
+    interface::set_if_multicast_flag,
     IOctlFlags,
 };
 use nix::{
     libc::socket,
     sys::socket::{
-        self, bind, setsockopt, sockopt, IpMembershipRequest, SockFlag, SockProtocol, SockaddrIn,
+        self, bind, setsockopt, sockopt, IpMembershipRequest, LinkAddr, SockFlag, SockProtocol,
+        SockaddrIn,
     },
 };
 
@@ -33,49 +35,10 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         };
     }
 
-    let interfaces = nix::net::if_::if_nameindex().unwrap();
-
-    let mut if_found = false;
-
-    for interface in interfaces.iter() {
-        match interface.name().to_str() {
-            Ok(name) => {
-                if name == if_name {
-                    if_found = true;
-                    break;
-                }
-            }
-            Err(_) => {}
-        }
-    }
-
-    if !if_found {
-        return Err(format!("No interface named {}", if_name));
-    }
-
-    let ifname_slice = &mut [0u8; 16];
-
-    for (i, b) in if_name.as_bytes().iter().enumerate() {
-        ifname_slice[i] = *b;
-    }
-
-    let mut if_opts = IOctlFlags {
-        ifr_name: {
-            let mut buf = [0u8; 16];
-            buf.clone_from_slice(ifname_slice);
-            buf
-        },
-        ifr_flags: 0,
-    };
-
-    unsafe {
-        // UP (0x01), RUNNING (0x40), MULTICAST (0x1000)
-        if_opts.ifr_flags |= IFR_FLAG_UP | IFR_FLAG_RUNNING | IFR_FLAG_MULTICAST;
-
-        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCSIFFLAGS, &mut if_opts);
-        if res < 0 {
-            println!("{}", std::io::Error::last_os_error().to_string());
-            return Err(format!("Cannot manipulate network interface {}", if_name));
+    match set_if_multicast_flag(&sock_fd, if_name) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(err);
         }
     }
 
@@ -190,4 +153,53 @@ pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
     }
 
     return Ok(sock_fd);
+}
+
+pub fn open_netlink_socket() -> Result<OwnedFd, String> {
+    let sock_fd = match nix::sys::socket::socket(
+        socket::AddressFamily::Netlink,
+        socket::SockType::Raw,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkRoute,
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(format!(
+                "Failed to open a raw socket - check the process privileges {}",
+                err.to_string()
+            ));
+        }
+    };
+
+    // socketFd - level - name - value - option_len
+    match setsockopt(&sock_fd, sockopt::SndBuf, &32768) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while setting SndBuf option for socket: {}",
+                err
+            ));
+        }
+    };
+
+    match setsockopt(&sock_fd, sockopt::RcvBuf, &1048576) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while setting RcvBuf option for socket: {}",
+                err
+            ));
+        }
+    };
+
+    let sock_addr = nix::sys::socket::NetlinkAddr::new(0, 0);
+
+    match bind(sock_fd.as_raw_fd(), &sock_addr) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!("Error while binding Netlink socket: {}", err));
+        }
+    };
+
+    Ok(sock_fd)
 }

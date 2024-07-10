@@ -3,8 +3,47 @@ use std::{convert::TryInto, net::Ipv4Addr};
 use serde::Deserialize;
 
 use crate::constants::{
-    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR
+    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, SOCKET_TTL, VIRTUAL_ROUTER_MAC,
+    VRRP_MCAST_ADDR,
 };
+
+// Size 8
+pub struct IfAddrMessage {
+    ifa_family: u8,
+    ifa_prefixlen: u8,
+    ifa_flags: u8,
+    ifa_scope: u8,
+    ifa_index: u32,
+}
+
+// Size 16
+pub struct NetLinkMessage {
+    msg_len: u32,
+    msg_type: u16,
+    msg_flags: u16,
+    msg_seq: u32,
+    msg_pid: u32,
+}
+
+// Size 4
+pub struct NetLinkAttribute {
+    nla_len: u16,
+    nla_type: u16,
+}
+
+impl NetLinkMessage {
+    pub fn to_bytes(&mut self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+
+        bytes.extend_from_slice(&self.msg_len.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_type.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_flags.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_seq.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_pid.to_ne_bytes());
+
+        bytes
+    }
+}
 
 // RFC 826
 pub struct GarpPacket {

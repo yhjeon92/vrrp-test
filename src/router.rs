@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     constants::{AF_PACKET, ETH_PROTO_ARP},
+    interface::add_ip_address,
     packet::GarpPacket,
     VrrpV2Packet, CONFIG,
 };
@@ -211,6 +212,16 @@ impl Router {
                                         );
 
                                         // TODO: Set Virtual IP to an interface
+                                        match add_ip_address(
+                                            &self.sock_fd,
+                                            &self.if_name,
+                                            self.virtual_ip,
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                println!("[ERROR] {}", err);
+                                            }
+                                        }
 
                                         // Promote oneself to Master
                                         self.state = State::Master;
@@ -262,6 +273,13 @@ impl Router {
                                 );
 
                                 // TODO: Set Virtual IP to an interface
+                                match add_ip_address(&self.sock_fd, &self.if_name, self.virtual_ip)
+                                {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        println!("[ERROR] {}", err);
+                                    }
+                                }
 
                                 println!("Master down interval expired. Transitioning to MASTER state...");
                                 self.state = State::Master;
