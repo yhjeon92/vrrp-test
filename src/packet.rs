@@ -1,4 +1,4 @@
-use std::{convert::TryInto, net::Ipv4Addr};
+use std::{convert::TryInto, mem::size_of_val, net::Ipv4Addr};
 
 use serde::Deserialize;
 
@@ -16,6 +16,30 @@ pub struct IfAddrMessage {
     ifa_index: u32,
 }
 
+impl IfAddrMessage {
+    pub fn new(family: u8, prefix_len: u8, flags: u8, scope: u8, index: u32) -> IfAddrMessage {
+        IfAddrMessage {
+            ifa_family: family,
+            ifa_prefixlen: prefix_len,
+            ifa_flags: flags,
+            ifa_scope: scope,
+            ifa_index: index,
+        }
+    }
+
+    pub fn to_bytes(&mut self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+
+        bytes.push(self.ifa_family);
+        bytes.push(self.ifa_prefixlen);
+        bytes.push(self.ifa_flags);
+        bytes.push(self.ifa_scope);
+        bytes.extend_from_slice(&self.ifa_index.to_ne_bytes());
+
+        bytes
+    }
+}
+
 // Size 16
 pub struct NetLinkMessage {
     msg_len: u32,
@@ -23,23 +47,65 @@ pub struct NetLinkMessage {
     msg_flags: u16,
     msg_seq: u32,
     msg_pid: u32,
+    attributes: Vec<NetLinkAttribute>,
 }
 
 // Size 4
 pub struct NetLinkAttribute {
     nla_len: u16,
     nla_type: u16,
+    nla_data: Vec<u8>,
 }
 
 impl NetLinkMessage {
-    pub fn to_bytes(&mut self) -> Vec<u8> {
+    pub fn new(
+        msg_len: u32,
+        msg_type: u16,
+        msg_flags: u16,
+        msg_seq: u32,
+        msg_pid: u32,
+    ) -> NetLinkMessage {
+        NetLinkMessage {
+            msg_len,
+            msg_type,
+            msg_flags,
+            msg_seq,
+            msg_pid,
+            attributes: Vec::<NetLinkAttribute>::new(),
+        }
+    }
+
+    pub fn add_attribute(&mut self, nla_len: u16, nla_type: u16, nla_data: Vec<u8>) {
+        _ = &self.attributes.push(NetLinkAttribute {
+            nla_len,
+            nla_type,
+            nla_data,
+        });
+    }
+
+    pub fn to_bytes(&mut self, payload: &mut Vec<u8>) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
 
-        bytes.extend_from_slice(&self.msg_len.to_ne_bytes());
-        bytes.extend_from_slice(&self.msg_type.to_ne_bytes());
-        bytes.extend_from_slice(&self.msg_flags.to_ne_bytes());
-        bytes.extend_from_slice(&self.msg_seq.to_ne_bytes());
-        bytes.extend_from_slice(&self.msg_pid.to_ne_bytes());
+        self.msg_len = (16 + payload.len()) as u32;
+
+        let mut attr_bytes: Vec<u8> = Vec::new();
+
+        for attribute in self.attributes.iter_mut() {
+            attr_bytes.extend_from_slice(&attribute.nla_len.to_le_bytes());
+            attr_bytes.extend_from_slice(&attribute.nla_type.to_le_bytes());
+            attr_bytes.append(&mut attribute.nla_data);
+            self.msg_len += (attribute.nla_data.len() + 4) as u32;
+        }
+
+        bytes.extend_from_slice(&self.msg_len.to_le_bytes());
+        bytes.extend_from_slice(&self.msg_type.to_le_bytes());
+        bytes.extend_from_slice(&self.msg_flags.to_le_bytes());
+        bytes.extend_from_slice(&self.msg_seq.to_le_bytes());
+        bytes.extend_from_slice(&self.msg_pid.to_le_bytes());
+
+        bytes.append(payload);
+
+        bytes.append(&mut attr_bytes);
 
         bytes
     }

@@ -31,6 +31,10 @@ pub const NLM_F_ACK: u16 = 0x04;
 pub const NLM_F_EXCL: u16 = 0x200;
 pub const NLM_F_CREATE: u16 = 0x400;
 
+// IFA SCOPE
+pub const RT_SCOPE_UNIVERSE: u8 = 0;
+
+// NetLink attributes
 pub const IFA_ADDRESS: u8 = 1;
 pub const IFA_LOCAL: u8 = 2;
 pub const IFA_LABEL: u8 = 3;
