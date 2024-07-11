@@ -213,7 +213,6 @@ impl Router {
 
                                         // TODO: Set Virtual IP to an interface
                                         match add_ip_address(
-                                            &self.sock_fd,
                                             &self.if_name,
                                             self.virtual_ip,
                                         ) {
@@ -273,7 +272,7 @@ impl Router {
                                 );
 
                                 // TODO: Set Virtual IP to an interface
-                                match add_ip_address(&self.sock_fd, &self.if_name, self.virtual_ip)
+                                match add_ip_address(&self.if_name, self.virtual_ip)
                                 {
                                     Ok(_) => {}
                                     Err(err) => {

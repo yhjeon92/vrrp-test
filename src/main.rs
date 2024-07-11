@@ -1,5 +1,6 @@
 use arc_swap::ArcSwap;
 use bincode::Options;
+use interface::add_ip_address;
 use once_cell::sync::Lazy;
 use packet::VrrpV2Packet;
 use router::{Event, Router};
@@ -37,6 +38,8 @@ struct Args {
     /// Path to the virtual router config file, defaults to vrrp.toml in working dir. Required for Virtual Router mode only.
     #[arg(short, default_value_t = String::from("vrrp.toml"))]
     config_file_path: String,
+    #[arg(short('d'), default_value_t = false)]
+    debug: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,6 +126,10 @@ fn main() {
             return;
         }
     };
+
+    if args.debug {
+        add_ip_address(&if_name, Ipv4Addr::new(172, 17, 0, 100));
+    }
 
     println!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());
 

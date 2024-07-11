@@ -78,15 +78,19 @@ pub struct NetLinkAttribute {
 }
 
 impl NetLinkAttribute {
-    pub fn new(nla_len: u16, nla_type: u16, mut nla_data: Vec<u8>) -> NetLinkAttribute {
-        let pad_len = ((nla_data.len() + 4 - 1) & !(4 - 1)) - nla_data.len();
-        for _ in 0..pad_len {
-            nla_data.push(0u8);
-        }
+    pub fn new(nla_len: u16, nla_type: u16, nla_data: Vec<u8>) -> NetLinkAttribute {
         NetLinkAttribute {
             nla_len,
             nla_type,
             nla_data,
+        }
+    }
+
+    pub fn pad_data(&mut self) {
+        let data_len = self.nla_data.len();
+        let pad_len = ((data_len + 4 - 1) & !(4 - 1)) - data_len;
+        for _ in 0..pad_len {
+            self.nla_data.push(0u8);
         }
     }
 }
@@ -110,9 +114,11 @@ impl NetLinkMessage {
     }
 
     pub fn add_attribute(&mut self, nla_len: u16, nla_type: u16, nla_data: Vec<u8>) {
+        let mut nl_attr = NetLinkAttribute::new(nla_len, nla_type, nla_data);
+        nl_attr.pad_data();
         _ = &self
             .attributes
-            .push(NetLinkAttribute::new(nla_len, nla_type, nla_data));
+            .push(nl_attr);
     }
 
     pub fn to_bytes(&mut self, payload: &mut Vec<u8>) -> Vec<u8> {
@@ -125,15 +131,14 @@ impl NetLinkMessage {
         let pad_len = ((data_len + 4 - 1) & !(4 - 1)) - data_len;
         self.msg_len = data_len + pad_len;
 
-        println!("data_len {}, pad_len {}", data_len, pad_len);
-
         let mut attr_bytes: Vec<u8> = Vec::new();
 
         for attribute in self.attributes.iter_mut() {
+            println!("attribute data len: {}", attribute.nla_data.len());
+            self.msg_len += (attribute.nla_data.len() + 4) as u32;
             attr_bytes.extend_from_slice(&attribute.nla_len.to_le_bytes());
             attr_bytes.extend_from_slice(&attribute.nla_type.to_le_bytes());
             attr_bytes.append(&mut attribute.nla_data);
-            self.msg_len += (attribute.nla_data.len() + 4) as u32;
         }
 
         bytes.extend_from_slice(&self.msg_len.to_le_bytes());

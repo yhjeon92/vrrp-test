@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     constants::{
-        AF_INET, AF_NETLINK, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_VRRPV2,
+        AF_INET, IPPROTO_VRRPV2,
         SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     interface::set_if_multicast_flag,

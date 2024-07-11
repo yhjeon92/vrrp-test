@@ -21,8 +21,10 @@ pub const IFR_FLAG_UP: i16 = 0x01;
 pub const IFR_FLAG_RUNNING: i16 = 0x40;
 pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
 
-// Message Types
+// Message Types (rtnetlink)
 pub const RTM_NEWADDR: u16 = 0x14;
+// Message Types (netlink)
+pub const NLMSG_ERROR: u16 = 0x02;
 
 // NetLink Message Flags
 pub const NLM_F_REQUEST: u16 = 0x01;

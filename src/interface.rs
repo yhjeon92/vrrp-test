@@ -1,16 +1,10 @@
 use std::{
-    ffi::c_void,
     io::{IoSlice, IoSliceMut},
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
-    str::FromStr,
 };
 
-use nix::{
-    ioctl_write_ptr,
-    libc::{in_addr, msghdr, sockaddr, sockaddr_in, sockaddr_nl},
-    sys::socket::{recvmsg, sendmsg, ControlMessage, LinkAddr, MsgFlags, SockaddrIn},
-};
+use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr};
 
 use crate::{
     constants::{
@@ -23,7 +17,7 @@ use crate::{
 };
 
 struct IfrFlags {
-    ifr_name: [u8; 16],
+    _ifr_name: [u8; 16],
     ifr_flags: i16,
 }
 
@@ -55,7 +49,7 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, S
     }
 
     let mut if_opts = IfrFlags {
-        ifr_name: {
+        _ifr_name: {
             let mut buf = [0u8; 16];
             buf.clone_from_slice(ifname_slice);
             buf
@@ -80,7 +74,7 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, S
     }
 }
 
-pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Result<bool, String> {
+pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
@@ -112,10 +106,9 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
     nl_msg.add_attribute(8u16, IFA_LOCAL as u16, Vec::from(address.octets()));
 
     let mut if_label = if_name.to_owned();
-    if_label.push_str(":1 ");
+    if_label.push_str(":1");
 
     nl_msg.add_attribute(
-        // ?
         (if_label.as_bytes().len() + 4 + 1) as u16,
         IFA_LABEL as u16,
         Vec::from(if_label.as_bytes()),
@@ -123,12 +116,11 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
 
     nl_msg.add_attribute(8u16, IFA_ADDRESS as u16, Vec::from(address.octets()));
 
-    // nl_msg.to_bytes(&mut ifa_msg.to_bytes());
     let cmsg: [ControlMessage; 0] = [];
 
-    let netlink_addr = nix::sys::socket::NetlinkAddr::new(0, 0);
+    let netlink_addr = NetlinkAddr::new(0, 0);
 
-    match sendmsg::<nix::sys::socket::NetlinkAddr>(
+    match sendmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
         &[IoSlice::new(
             nl_msg.to_bytes(&mut ifa_msg.to_bytes()).as_slice(),
@@ -149,17 +141,24 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
     let recv_iovec_mut = IoSliceMut::new(&mut dummy);
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let recv_result = match recvmsg::<nix::sys::socket::NetlinkAddr>(
+    let recv_result = match recvmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
         &mut [recv_iovec_mut],
         Some(&mut recv_cmsg_buf),
-        MsgFlags::MSG_TRUNC,
+        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
     ) {
-        Ok(data) => match String::from_utf8(recv_cmsg_buf) {
-            Ok(decoded) => decoded,
-            Err(err) => {
-                println!("Parsing ERR {}", err.to_string());
-                return Err(err.to_string());
+        Ok(data) => {
+            println!("Response byte len: {}", data.bytes);
+            for ind in 0..data.bytes {
+                print!("{:02X?} ", dummy[ind]);
+            }
+            println!();
+            match String::from_utf8(recv_cmsg_buf) {
+                Ok(decoded) => decoded,
+                Err(err) => {
+                    println!("Parsing ERR {}", err.to_string());
+                    return Err(err.to_string());
+                }
             }
         },
         Err(err) => {
@@ -167,17 +166,6 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
             return Err(err.to_string());
         }
     };
-
-    // sendmsg(fd, iov, cmsgs, flags, addr)
-
-    // match sendmsg(nl_sock_fd.as_raw_fd(), iov, (), MsgFlags::empty(), addr) {
-    //     Ok(len) => {
-    //         println!("{}", len);
-    //     }
-    //     Err(err) => {
-    //         return Err(err.to_string());
-    //     }
-    // }
 
     Ok(true)
 }
