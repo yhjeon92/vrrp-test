@@ -22,14 +22,9 @@ use crate::{
     socket::open_netlink_socket,
 };
 
-struct IOctlFlags {
-    ifr_name: [u8; 16],
-    ifr_flags: i16,
-}
-
 struct IfrFlags {
     ifr_name: [u8; 16],
-    ifr_addr: sockaddr_in,
+    ifr_flags: i16,
 }
 
 pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, String> {
@@ -59,7 +54,7 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, S
         ifname_slice[i] = *b;
     }
 
-    let mut if_opts = IOctlFlags {
+    let mut if_opts = IfrFlags {
         ifr_name: {
             let mut buf = [0u8; 16];
             buf.clone_from_slice(ifname_slice);
@@ -107,7 +102,7 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
     let mut ifa_msg = IfAddrMessage::new(AF_INET as u8, 16u8, 0u8, RT_SCOPE_UNIVERSE, if_ind);
 
     let mut nl_msg = NetLinkMessage::new(
-        56,
+        0,
         RTM_NEWADDR,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE,
         0,
@@ -121,7 +116,7 @@ pub fn add_ip_address(sock_fd: &OwnedFd, if_name: &str, address: Ipv4Addr) -> Re
 
     nl_msg.add_attribute(
         // ?
-        (if_label.as_bytes().len() + 4) as u16,
+        (if_label.as_bytes().len() + 4 + 1) as u16,
         IFA_LABEL as u16,
         Vec::from(if_label.as_bytes()),
     );

@@ -1,4 +1,4 @@
-use std::{convert::TryInto, mem::size_of_val, net::Ipv4Addr};
+use std::{convert::TryInto, net::Ipv4Addr};
 
 use serde::Deserialize;
 
@@ -40,7 +40,17 @@ impl IfAddrMessage {
     }
 }
 
-// Size 16
+// Hdr Size 16
+/*
+    <----------- nlmsg_total_size(len) ------------>
+    <----------- nlmsg_size(len) ------------>
+
+   +-------------------+- - -+- - - - - - - - +- - -+-------------------+- - -
+   |  struct nlmsghdr  | Pad |     Payload    | Pad |  struct nlsmghdr  |
+   +-------------------+- - -+- - - - - - - - +- - -+-------------------+- - -
+
+    <---- NLMSG_HDRLEN -----> <- NLMSG_ALIGN(len) -> <---- NLMSG_HDRLEN ---
+*/
 pub struct NetLinkMessage {
     msg_len: u32,
     msg_type: u16,
@@ -50,11 +60,35 @@ pub struct NetLinkMessage {
     attributes: Vec<NetLinkAttribute>,
 }
 
-// Size 4
+// Hdr Size 4
+/*
+     <----------- nla_total_size(payload) ----------->
+     <---------- nla_size(payload) ----------->
+
+    +-----------------+- - -+- - - - - - - - - +- - -+-----------------+- - -
+    |  struct nlattr  | Pad |     Payload      | Pad |  struct nlattr  |
+    +-----------------+- - -+- - - - - - - - - +- - -+-----------------+- - -
+
+     <---- NLA_HDRLEN -----> <--- NLA_ALIGN(len) ---> <---- NLA_HDRLEN ---
+*/
 pub struct NetLinkAttribute {
     nla_len: u16,
     nla_type: u16,
     nla_data: Vec<u8>,
+}
+
+impl NetLinkAttribute {
+    pub fn new(nla_len: u16, nla_type: u16, mut nla_data: Vec<u8>) -> NetLinkAttribute {
+        let pad_len = ((nla_data.len() + 4 - 1) & !(4 - 1)) - nla_data.len();
+        for _ in 0..pad_len {
+            nla_data.push(0u8);
+        }
+        NetLinkAttribute {
+            nla_len,
+            nla_type,
+            nla_data,
+        }
+    }
 }
 
 impl NetLinkMessage {
@@ -76,17 +110,22 @@ impl NetLinkMessage {
     }
 
     pub fn add_attribute(&mut self, nla_len: u16, nla_type: u16, nla_data: Vec<u8>) {
-        _ = &self.attributes.push(NetLinkAttribute {
-            nla_len,
-            nla_type,
-            nla_data,
-        });
+        _ = &self
+            .attributes
+            .push(NetLinkAttribute::new(nla_len, nla_type, nla_data));
     }
 
     pub fn to_bytes(&mut self, payload: &mut Vec<u8>) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
 
-        self.msg_len = (16 + payload.len()) as u32;
+        // self.msg_len = (16 + payload.len()) as u32;
+
+        // Netlink message must be padded to have the length multiple of NLMSG_ALIGNTO, which is fixed to 4 bytes.
+        let data_len = (16 + payload.len()) as u32;
+        let pad_len = ((data_len + 4 - 1) & !(4 - 1)) - data_len;
+        self.msg_len = data_len + pad_len;
+
+        println!("data_len {}, pad_len {}", data_len, pad_len);
 
         let mut attr_bytes: Vec<u8> = Vec::new();
 
@@ -102,6 +141,10 @@ impl NetLinkMessage {
         bytes.extend_from_slice(&self.msg_flags.to_le_bytes());
         bytes.extend_from_slice(&self.msg_seq.to_le_bytes());
         bytes.extend_from_slice(&self.msg_pid.to_le_bytes());
+
+        for _ in 0..pad_len {
+            bytes.push(0u8);
+        }
 
         bytes.append(payload);
 

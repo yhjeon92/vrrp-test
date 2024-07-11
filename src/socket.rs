@@ -10,7 +10,6 @@ use crate::{
         SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     interface::set_if_multicast_flag,
-    IOctlFlags,
 };
 use nix::{
     libc::socket,

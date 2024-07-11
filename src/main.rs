@@ -1,10 +1,9 @@
 use arc_swap::ArcSwap;
 use bincode::Options;
-use interface::add_ip_address;
 use once_cell::sync::Lazy;
 use packet::VrrpV2Packet;
 use router::{Event, Router};
-use socket::{open_advertisement_socket, open_arp_socket, open_netlink_socket};
+use socket::{open_advertisement_socket, open_arp_socket};
 use std::{
     convert::TryInto,
     fs::File,
@@ -38,9 +37,6 @@ struct Args {
     /// Path to the virtual router config file, defaults to vrrp.toml in working dir. Required for Virtual Router mode only.
     #[arg(short, default_value_t = String::from("vrrp.toml"))]
     config_file_path: String,
-    /// For testing only
-    #[arg(short, default_value_t = false)]
-    debug: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,12 +58,6 @@ impl Config {
             virtual_ip: Ipv4Addr::new(0, 0, 0, 0),
         }
     }
-}
-
-#[repr(C)]
-struct IOctlFlags {
-    ifr_name: [u8; 16],
-    ifr_flags: i16,
 }
 
 static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::from_pointee(Config::dummy()));
@@ -133,17 +123,6 @@ fn main() {
             return;
         }
     };
-
-    if args.debug {
-        let nlsock_fd = match open_netlink_socket() {
-            Ok(fd) => fd,
-            Err(err) => {
-                return;
-            }
-        };
-
-        add_ip_address(&nlsock_fd, "docker0", Ipv4Addr::new(172, 17, 0, 100));
-    }
 
     println!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());
 
