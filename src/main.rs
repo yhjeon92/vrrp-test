@@ -65,7 +65,8 @@ impl Config {
 
 static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::from_pointee(Config::dummy()));
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     match args.router {
@@ -128,7 +129,7 @@ fn main() {
     };
 
     if args.debug {
-        add_ip_address(&if_name, Ipv4Addr::new(172, 17, 0, 100));
+        let _ = add_ip_address(&if_name, Ipv4Addr::new(172, 17, 0, 100));
     }
 
     println!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());

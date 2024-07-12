@@ -1,10 +1,10 @@
-use std::{convert::TryInto, net::Ipv4Addr};
+use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 
 use serde::Deserialize;
 
 use crate::constants::{
-    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, SOCKET_TTL, VIRTUAL_ROUTER_MAC,
-    VRRP_MCAST_ADDR,
+    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, NLATTR_ALIGNTO, NLMSG_ALIGNTO,
+    SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR,
 };
 
 // Size 8
@@ -27,7 +27,7 @@ impl IfAddrMessage {
         }
     }
 
-    pub fn to_bytes(&mut self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
 
         bytes.push(self.ifa_family);
@@ -51,13 +51,68 @@ impl IfAddrMessage {
 
     <---- NLMSG_HDRLEN -----> <- NLMSG_ALIGN(len) -> <---- NLMSG_HDRLEN ---
 */
-pub struct NetLinkMessage {
+pub struct NetLinkMessageHeader {
     msg_len: u32,
     msg_type: u16,
     msg_flags: u16,
     msg_seq: u32,
     msg_pid: u32,
-    attributes: Vec<NetLinkAttribute>,
+}
+
+impl NetLinkMessageHeader {
+    pub fn from_slice(buf: &[u8]) -> Option<NetLinkMessageHeader> {
+        if buf.len() < size_of::<NetLinkMessageHeader>() {
+            None
+        } else {
+            Some(NetLinkMessageHeader {
+                msg_len: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+                msg_type: u16::from_ne_bytes(buf[4..6].try_into().unwrap()),
+                msg_flags: u16::from_ne_bytes(buf[6..8].try_into().unwrap()),
+                msg_seq: u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
+                msg_pid: u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
+            })
+        }
+    }
+
+    pub fn new(
+        msg_len: u32,
+        msg_type: u16,
+        msg_flags: u16,
+        msg_seq: u32,
+        msg_pid: u32,
+    ) -> NetLinkMessageHeader {
+        NetLinkMessageHeader {
+            msg_len,
+            msg_type,
+            msg_flags,
+            msg_seq,
+            msg_pid,
+        }
+    }
+
+    pub fn to_bytes(&mut self, payload: &mut Vec<u8>) -> Vec<u8> {
+        let data_len = (size_of::<NetLinkMessageHeader>() + payload.len()) as u32;
+        // Pad to multiple of NLMSG_ALIGNTO
+        let pad_len = ((data_len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)) - data_len;
+
+        self.msg_len = data_len + pad_len;
+
+        let mut bytes: Vec<u8> = Vec::new();
+
+        bytes.extend_from_slice(&self.msg_len.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_type.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_flags.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_seq.to_ne_bytes());
+        bytes.extend_from_slice(&self.msg_pid.to_ne_bytes());
+
+        for _ in 0..pad_len {
+            bytes.push(0u8);
+        }
+
+        bytes.append(payload);
+
+        bytes
+    }
 }
 
 // Hdr Size 4
@@ -71,91 +126,41 @@ pub struct NetLinkMessage {
 
      <---- NLA_HDRLEN -----> <--- NLA_ALIGN(len) ---> <---- NLA_HDRLEN ---
 */
-pub struct NetLinkAttribute {
+pub struct NetLinkAttributeHeader {
     nla_len: u16,
     nla_type: u16,
-    nla_data: Vec<u8>,
 }
 
-impl NetLinkAttribute {
-    pub fn new(nla_len: u16, nla_type: u16, nla_data: Vec<u8>) -> NetLinkAttribute {
-        NetLinkAttribute {
-            nla_len,
-            nla_type,
-            nla_data,
+impl NetLinkAttributeHeader {
+    pub fn new(nla_len: u16, nla_type: u16) -> NetLinkAttributeHeader {
+        NetLinkAttributeHeader { nla_len, nla_type }
+    }
+
+    pub fn from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
+        if buf.len() < size_of::<NetLinkAttributeHeader>() {
+            None
+        } else {
+            Some(NetLinkAttributeHeader {
+                nla_len: u16::from_ne_bytes(buf[0..2].try_into().unwrap()),
+                nla_type: u16::from_ne_bytes(buf[2..4].try_into().unwrap()),
+            })
         }
     }
 
-    pub fn pad_data(&mut self) {
-        let data_len = self.nla_data.len();
-        let pad_len = ((data_len + 4 - 1) & !(4 - 1)) - data_len;
-        for _ in 0..pad_len {
-            self.nla_data.push(0u8);
-        }
-    }
-}
+    pub fn to_bytes(&self, payload: &mut Vec<u8>) -> Vec<u8> {
+        let pad_len = ((self.nla_len + NLATTR_ALIGNTO - 1) & !(NLATTR_ALIGNTO - 1))
+            - payload.len() as u16
+            - size_of::<NetLinkAttributeHeader>() as u16;
+        let mut byte_vec = Vec::<u8>::new();
 
-impl NetLinkMessage {
-    pub fn new(
-        msg_len: u32,
-        msg_type: u16,
-        msg_flags: u16,
-        msg_seq: u32,
-        msg_pid: u32,
-    ) -> NetLinkMessage {
-        NetLinkMessage {
-            msg_len,
-            msg_type,
-            msg_flags,
-            msg_seq,
-            msg_pid,
-            attributes: Vec::<NetLinkAttribute>::new(),
-        }
-    }
-
-    pub fn add_attribute(&mut self, nla_len: u16, nla_type: u16, nla_data: Vec<u8>) {
-        let mut nl_attr = NetLinkAttribute::new(nla_len, nla_type, nla_data);
-        nl_attr.pad_data();
-        _ = &self
-            .attributes
-            .push(nl_attr);
-    }
-
-    pub fn to_bytes(&mut self, payload: &mut Vec<u8>) -> Vec<u8> {
-        let mut bytes: Vec<u8> = Vec::new();
-
-        // self.msg_len = (16 + payload.len()) as u32;
-
-        // Netlink message must be padded to have the length multiple of NLMSG_ALIGNTO, which is fixed to 4 bytes.
-        let data_len = (16 + payload.len()) as u32;
-        let pad_len = ((data_len + 4 - 1) & !(4 - 1)) - data_len;
-        self.msg_len = data_len + pad_len;
-
-        let mut attr_bytes: Vec<u8> = Vec::new();
-
-        for attribute in self.attributes.iter_mut() {
-            println!("attribute data len: {}", attribute.nla_data.len());
-            self.msg_len += (attribute.nla_data.len() + 4) as u32;
-            attr_bytes.extend_from_slice(&attribute.nla_len.to_le_bytes());
-            attr_bytes.extend_from_slice(&attribute.nla_type.to_le_bytes());
-            attr_bytes.append(&mut attribute.nla_data);
-        }
-
-        bytes.extend_from_slice(&self.msg_len.to_le_bytes());
-        bytes.extend_from_slice(&self.msg_type.to_le_bytes());
-        bytes.extend_from_slice(&self.msg_flags.to_le_bytes());
-        bytes.extend_from_slice(&self.msg_seq.to_le_bytes());
-        bytes.extend_from_slice(&self.msg_pid.to_le_bytes());
+        byte_vec.extend_from_slice(&self.nla_len.to_ne_bytes());
+        byte_vec.extend_from_slice(&self.nla_type.to_ne_bytes());
+        byte_vec.append(payload);
 
         for _ in 0..pad_len {
-            bytes.push(0u8);
+            byte_vec.push(0u8);
         }
-
-        bytes.append(payload);
-
-        bytes.append(&mut attr_bytes);
-
-        bytes
+        byte_vec
     }
 }
 

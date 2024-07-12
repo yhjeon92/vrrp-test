@@ -1,5 +1,6 @@
 use std::{
     io::{IoSlice, IoSliceMut},
+    mem::size_of,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
 };
@@ -12,7 +13,7 @@ use crate::{
         IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_NEWADDR,
         RT_SCOPE_UNIVERSE,
     },
-    packet::{IfAddrMessage, NetLinkMessage},
+    packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
     socket::open_netlink_socket,
 };
 
@@ -21,7 +22,7 @@ struct IfrFlags {
     ifr_flags: i16,
 }
 
-pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, String> {
+pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), String> {
     let interfaces = nix::net::if_::if_nameindex().unwrap();
 
     let mut if_found = false;
@@ -70,19 +71,17 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<bool, S
             ));
         }
 
-        return Ok(true);
+        return Ok(());
     }
 }
 
-pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> {
+pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
             return Err(err);
         }
     };
-
-    println!("Netlink Socket opened: {}", nl_sock_fd.as_raw_fd());
 
     let if_ind = match nix::net::if_::if_nametoindex(if_name) {
         Ok(ind) => ind,
@@ -91,11 +90,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> 
         }
     };
 
-    println!("if_ind: {}", if_ind);
-
-    let mut ifa_msg = IfAddrMessage::new(AF_INET as u8, 16u8, 0u8, RT_SCOPE_UNIVERSE, if_ind);
-
-    let mut nl_msg = NetLinkMessage::new(
+    let mut nl_msg = NetLinkMessageHeader::new(
         0,
         RTM_NEWADDR,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE,
@@ -103,18 +98,42 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> 
         0,
     );
 
-    nl_msg.add_attribute(8u16, IFA_LOCAL as u16, Vec::from(address.octets()));
+    let mut payload_bytes = Vec::<u8>::new();
 
-    let mut if_label = if_name.to_owned();
-    if_label.push_str(":1");
-
-    nl_msg.add_attribute(
-        (if_label.as_bytes().len() + 4 + 1) as u16,
-        IFA_LABEL as u16,
-        Vec::from(if_label.as_bytes()),
+    let ifa_msg = IfAddrMessage::new(
+        AF_INET as u8,
+        size_of::<NetLinkMessageHeader>() as u8,
+        0u8,
+        RT_SCOPE_UNIVERSE,
+        if_ind,
     );
 
-    nl_msg.add_attribute(8u16, IFA_ADDRESS as u16, Vec::from(address.octets()));
+    payload_bytes.append(&mut ifa_msg.to_bytes());
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + 4) as u16,
+            IFA_LOCAL,
+        )
+        .to_bytes(&mut Vec::from(address.octets())),
+    );
+
+    let if_label = format!("{}:0001", if_name);
+
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + if_label.len() + 1) as u16,
+            IFA_LABEL,
+        )
+        .to_bytes(&mut Vec::from(if_label.as_bytes())),
+    );
+
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + 4) as u16,
+            IFA_ADDRESS,
+        )
+        .to_bytes(&mut Vec::from(address.octets())),
+    );
 
     let cmsg: [ControlMessage; 0] = [];
 
@@ -122,16 +141,12 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> 
 
     match sendmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
-        &[IoSlice::new(
-            nl_msg.to_bytes(&mut ifa_msg.to_bytes()).as_slice(),
-        )],
+        &[IoSlice::new(nl_msg.to_bytes(&mut payload_bytes).as_slice())],
         &cmsg,
         MsgFlags::empty(),
         Some(&netlink_addr),
     ) {
-        Ok(len) => {
-            println!("Sent succesfully: {} bytes", len);
-        }
+        Ok(_len) => {}
         Err(err) => {
             println!("[ERROR] {}", err.to_string());
         }
@@ -148,7 +163,6 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> 
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
     ) {
         Ok(data) => {
-            println!("Response byte len: {}", data.bytes);
             for ind in 0..data.bytes {
                 print!("{:02X?} ", dummy[ind]);
             }
@@ -160,12 +174,12 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<bool, String> 
                     return Err(err.to_string());
                 }
             }
-        },
+        }
         Err(err) => {
             println!("ERR {}", err.to_string());
             return Err(err.to_string());
         }
     };
 
-    Ok(true)
+    Ok(())
 }
