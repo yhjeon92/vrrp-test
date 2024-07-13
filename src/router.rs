@@ -8,17 +8,17 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use log::{debug, error, info, warn};
 use nix::{
     libc::{sockaddr, sockaddr_ll},
     sys::socket::{LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
-    NixPath,
 };
 use once_cell::sync::Lazy;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     constants::{AF_PACKET, ETH_PROTO_ARP},
-    interface::add_ip_address,
+    interface::{add_ip_address, get_if_index},
     packet::GarpPacket,
     VrrpV2Packet, CONFIG,
 };
@@ -108,29 +108,30 @@ impl Router {
     }
 
     // RFC 3768 Protocol State Machine
-    pub fn start(&mut self) {
-        println!("Router thread running...");
+    pub async fn start(&mut self) {
+        info!("Router thread running...");
 
         let advert_pkt = match self.build_packet() {
             Some(pkt) => pkt.clone(),
             _ => {
-                println!("[ERROR] failed to build VRRP advertisement packet");
+                error!("[ERROR] failed to build VRRP advertisement packet");
                 return;
             }
         };
 
-        println!("MASTER DOWN INTERVAL SET TO {}", self.master_down_int);
+        info!("MASTER DOWN INTERVAL set to {}", self.master_down_int);
 
         // main router loop
         loop {
-            match self.router_rx.blocking_recv() {
+            // match self.router_rx.blocking_recv() {
+            match self.router_rx.recv().await {
                 Some(event) => {
-                    println!("{}", event);
+                    info!("{}", event);
 
                     match event {
                         Event::AdvertReceived(router_id, priority, src_addr) => match self.state {
                             State::Backup => {
-                                println!(
+                                info!(
                                     "\tAdvert router id {} - priority {} - src {}",
                                     router_id,
                                     priority,
@@ -176,7 +177,7 @@ impl Router {
                                         );
 
                                         // Transition to Backup
-                                        println!("Advertisement of priority {} received from src {}, transitioning to BACKUP state...", priority, src_addr.to_string());
+                                        info!("Advertisement of priority {} received from src {}, transitioning to BACKUP state...", priority, src_addr.to_string());
                                         self.state = State::Backup;
                                     }
                                 }
@@ -218,7 +219,7 @@ impl Router {
                                         ) {
                                             Ok(_) => {}
                                             Err(err) => {
-                                                println!("[ERROR] {}", err);
+                                                error!("[ERROR] {}", err);
                                             }
                                         }
 
@@ -276,11 +277,11 @@ impl Router {
                                 {
                                     Ok(_) => {}
                                     Err(err) => {
-                                        println!("[ERROR] {}", err);
+                                        error!("[ERROR] {}", err);
                                     }
                                 }
 
-                                println!("Master down interval expired. Transitioning to MASTER state...");
+                                warn!("Master down interval expired. Transitioning to MASTER state...");
                                 self.state = State::Master;
                             }
                             _ => {
@@ -299,7 +300,7 @@ impl Router {
                 }
                 _ => {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    println!("No Event!");
+                    warn!("No Event!");
                 }
             }
         }
@@ -335,8 +336,8 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
     ) {
         Ok(_) => {}
         Err(err) => {
-            println!(
-                "An error was encountered while sending packet! {}",
+            warn!(
+                "Failed to send VRRP advertisement: {}",
                 err.to_string()
             );
         }
@@ -347,48 +348,56 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
     let mut pkt = GarpPacket::new(virtual_ip, router_id);
 
     unsafe {
-        println!("interface {} len {}", if_name, if_name.len());
+        debug!("interface {} len {}", if_name, if_name.len());
 
-        let if_index = match nix::net::if_::if_nameindex() {
-            Ok(ifs) => {
-                let mut index: i32 = -1;
-                for interface in ifs.iter() {
-                    let if_name_target = match interface.name().to_str() {
-                        Ok(name) => name,
-                        Err(err) => {
-                            println!("Error.. {}", err.to_string());
-                            return;
-                        }
-                    };
+        // let if_index = match nix::net::if_::if_nameindex() {
+        //     Ok(ifs) => {
+        //         let mut index: i32 = -1;
+        //         for interface in ifs.iter() {
+        //             let if_name_target = match interface.name().to_str() {
+        //                 Ok(name) => name,
+        //                 Err(err) => {
+        //                     println!("Error.. {}", err.to_string());
+        //                     return;
+        //                 }
+        //             };
 
-                    println!(
-                        "Interface {} Len {}",
-                        if_name_target,
-                        interface.name().len()
-                    );
+        //             println!(
+        //                 "Interface {} Len {}",
+        //                 if_name_target,
+        //                 interface.name().len()
+        //             );
 
-                    if if_name.eq(if_name_target) {
-                        index = interface.index() as i32;
-                        println!("Found interface {}", if_name);
-                        break;
-                    }
-                }
+        //             if if_name.eq(if_name_target) {
+        //                 index = interface.index() as i32;
+        //                 println!("Found interface {}", if_name);
+        //                 break;
+        //             }
+        //         }
 
-                match index {
-                    -1 => {
-                        println!("Error..");
-                        return;
-                    }
-                    ind => ind as usize,
-                }
-            }
+        //         match index {
+        //             -1 => {
+        //                 println!("Error..");
+        //                 return;
+        //             }
+        //             ind => ind as usize,
+        //         }
+        //     }
+        //     Err(err) => {
+        //         println!("[ERROR] {}", err.to_string());
+        //         return;
+        //     }
+        // };
+
+        let if_index = match get_if_index(&if_name) {
+            Ok(ind) => ind,
             Err(err) => {
-                println!("[ERROR] {}", err.to_string());
+                error!("{}", err);
                 return;
             }
         };
 
-        println!("IF_INDEX {}", if_index);
+        debug!("IF_INDEX {}", if_index);
 
         let mut sock_addr = nix::libc::sockaddr_ll {
             sll_family: AF_PACKET as u16,
@@ -405,7 +414,7 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
         let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
             Some(addr) => addr,
             None => {
-                println!("[ERROR] failed to instantiate sockaddr");
+                error!("Failed to construct sockaddr");
                 return;
             }
         };
@@ -417,10 +426,10 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
             MsgFlags::empty(),
         ) {
             Ok(size) => {
-                println!("Sent a GARP of len {}", size);
+                info!("Sent a GARP of len {}", size);
             }
             Err(err) => {
-                println!(
+                warn!(
                     "An error was encountered while sending GARP request! {}",
                     err.to_string()
                 );
@@ -434,11 +443,11 @@ pub fn start_master_down_timer(interval: f32, tx: Sender<Event>) {
         thread::sleep(Duration::from_millis((interval * 1000 as f32) as u64));
 
         if !**MASTER_HEALTHY.load() {
-            println!("Master Unhealthy");
+            warn!("Master Unhealthy");
             _ = tx.blocking_send(Event::MasterDown);
         } else {
             MASTER_HEALTHY.store(Arc::new(false));
-            println!("Master Healthy, skipping..");
+            info!("Master Healthy");
         }
     });
 }

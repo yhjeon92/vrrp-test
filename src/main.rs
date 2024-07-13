@@ -1,6 +1,8 @@
 use arc_swap::ArcSwap;
 use bincode::Options;
+use constants::VRRP_HDR_LEN;
 use interface::add_ip_address;
+use log::{info, warn, debug, error};
 use once_cell::sync::Lazy;
 use packet::VrrpV2Packet;
 use router::{Event, Router};
@@ -13,9 +15,9 @@ use std::{
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
-    thread,
+    thread, time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::{futures, mpsc}};
 mod constants;
 mod interface;
 mod packet;
@@ -64,10 +66,17 @@ impl Config {
 }
 
 static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::from_pointee(Config::dummy()));
+static DEBUG: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(false));
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    std::env::set_var("RUST_LOG", if args.debug { "debug" } else { "info" });
+
+    env_logger::init();
+
+    DEBUG.store(Arc::new(args.debug));
 
     match args.router {
         true => {
@@ -75,7 +84,7 @@ async fn main() {
             let mut file = match File::open(args.config_file_path) {
                 Ok(file) => file,
                 Err(err) => {
-                    println!("[ERROR] while opening config file: {}", err.to_string());
+                    error!("[ERROR] while opening config file: {}", err.to_string());
                     return;
                 }
             };
@@ -83,22 +92,22 @@ async fn main() {
             match file.read_to_string(&mut contents) {
                 Ok(_) => (),
                 Err(err) => {
-                    println!("[ERROR] while reading config file: {}", err.to_string());
+                    error!("[ERROR] while reading config file: {}", err.to_string());
                     return;
                 }
             };
 
             match toml::from_str::<Config>(&contents) {
                 Ok(config) => {
-                    println!("Interface  {}", config.interface);
-                    println!("Router Id  {}", config.router_id);
-                    println!("Priority   {}", config.priority);
-                    println!("Interval   {}", config.advert_int);
-                    println!("Virtual IP {}", config.virtual_ip.to_string());
+                    info!("Interface  {}", config.interface);
+                    info!("Router Id  {}", config.router_id);
+                    info!("Priority   {}", config.priority);
+                    info!("Interval   {}", config.advert_int);
+                    info!("Virtual IP {}", config.virtual_ip.to_string());
                     CONFIG.store(Arc::new(config));
                 }
                 Err(err) => {
-                    println!(
+                    error!(
                         "[ERROR] while parsing configuration file: {}",
                         err.to_string()
                     );
@@ -113,7 +122,7 @@ async fn main() {
         true => CONFIG.load_full().interface.clone(),
         false => match args.interface.is_empty() {
             true => {
-                println!("[ERROR] Network interface name must be specified with -i flag in Readonly mode");
+                error!("[ERROR] Network interface name must be specified with -i flag in Readonly mode");
                 return;
             }
             false => args.interface,
@@ -123,16 +132,14 @@ async fn main() {
     let sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
         Err(err) => {
-            println!("[ERROR] while opening socket: {}", err.to_string());
+            error!("[ERROR] while opening socket: {}", err.to_string());
             return;
         }
     };
 
-    if args.debug {
+    if **DEBUG.load() {
         let _ = add_ip_address(&if_name, Ipv4Addr::new(172, 17, 0, 100));
     }
-
-    println!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());
 
     let mut pkt_buf: [u8; 1024] = [0; 1024];
 
@@ -143,7 +150,7 @@ async fn main() {
         let arp_sock_fd = match open_arp_socket(&if_name) {
             Ok(fd) => fd,
             Err(err) => {
-                println!("[ERROR] while opening arp socket: {}", err.to_string());
+                error!("[ERROR] while opening arp socket: {}", err.to_string());
                 return;
             }
         };
@@ -153,7 +160,7 @@ async fn main() {
             match sock_fd.try_clone() {
                 Ok(cloned_fd) => cloned_fd,
                 Err(err) => {
-                    println!(
+                    error!(
                         "[ERROR] Cloning fd {} failed: {}",
                         sock_fd.as_raw_fd(),
                         err.to_string()
@@ -167,22 +174,24 @@ async fn main() {
         ) {
             Ok(router) => router,
             Err(err) => {
-                println!("[ERROR] failed to initialize a router: {}", err);
+                error!("[ERROR] failed to initialize a router: {}", err);
                 return;
             }
         };
 
-        thread::spawn(move || {
-            router.start();
-        });
-
-        _ = tx.blocking_send(Event::Startup);
+        // thread::spawn(move || {
+        //     router.start();
+        // });
+        tokio::task::spawn(async move { router.start().await });
+        _ = tx.send(Event::Startup).await;
+        info!("Router Startup");
+        info!("Listening for vRRPv2 packets... {}", sock_fd.as_raw_fd());
 
         loop {
             let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
                 Ok(pkt) => pkt,
                 Err(err) => {
-                    println!("[ERROR] {}", err.to_string());
+                    error!("[ERROR] {}", err.to_string());
                     continue;
                 }
             };
@@ -195,19 +204,20 @@ async fn main() {
                 Ok(_) => {
                     // vrrp_pkt.print();
 
-                    match tx.blocking_send(Event::AdvertReceived(
-                        router_id,
-                        priority,
-                        Ipv4Addr::from(src_addr),
-                    )) {
-                        Ok(_) => (),
-                        Err(err) => {
-                            println!("[ERROR], {}", err.to_string());
-                        }
-                    };
+                    // match tx.blocking_send(Event::AdvertReceived(
+                    //     router_id,
+                    //     priority,
+                    //     Ipv4Addr::from(src_addr),
+                    // )) {
+                    //     Ok(_) => (),
+                    //     Err(err) => {
+                    //         error!("[ERROR], {}", err.to_string());
+                    //     }
+                    // };
+                    _ = tx.send(Event::AdvertReceived(router_id, priority, Ipv4Addr::from(src_addr))).await;
                 }
                 Err(err) => {
-                    println!("[ERROR] {}", err);
+                    error!("[ERROR] {}", err);
                 }
             }
         }
@@ -217,7 +227,7 @@ async fn main() {
             let vrrp_pkt = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
                 Ok(pkt) => pkt,
                 Err(err) => {
-                    println!("[ERROR] {}", err.to_string());
+                    error!("[ERROR] {}", err.to_string());
                     continue;
                 }
             };
@@ -227,7 +237,7 @@ async fn main() {
                     vrrp_pkt.print();
                 }
                 Err(err) => {
-                    println!("[ERROR] {}", err);
+                    error!("[ERROR] {}", err);
                 }
             }
         }
@@ -236,14 +246,7 @@ async fn main() {
 
 fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
     let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
-        Ok((pkt_len, sender_addr)) => {
-            println!("Message of len {}", pkt_len);
-            match sender_addr {
-                Some(addr) => {
-                    println!("Sender Address {}", addr.ip().to_string());
-                }
-                None => {}
-            };
+        Ok((pkt_len, _)) => {
             pkt_len
         }
         Err(err) => {
@@ -256,19 +259,17 @@ fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packe
         .with_fixint_encoding()
         .allow_trailing_bytes()
         .with_big_endian()
-        .deserialize(&pkt_buf[0..28])
+        .deserialize(&pkt_buf[0..VRRP_HDR_LEN])
         .unwrap();
 
-    for ind in 0..len {
-        print!("{:02X?} ", pkt_buf[ind as usize]);
-    }
-    print!("\n");
+    debug!("VRRPv2 socket received a packet:");
+    debug!("{}", pkt_buf[0..len].iter().map(|byte| format!("{:02X?} ", byte)).collect::<String>());
 
     let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
 
     for ind in 0..vrrp_pkt.cnt_ip_addr {
         vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-            pkt_buf[(28 + ind * 4) as usize..(32 + ind * 4) as usize]
+            pkt_buf[VRRP_HDR_LEN + (ind * 4) as usize..VRRP_HDR_LEN + 4 + (ind * 4) as usize]
                 .try_into()
                 .unwrap(),
         )));
@@ -276,7 +277,7 @@ fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packe
 
     vrrp_pkt.set_vip_addresses(&vip_addresses);
 
-    let auth_data = pkt_buf[(28 + vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
+    let auth_data = pkt_buf[VRRP_HDR_LEN + (vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
 
     vrrp_pkt.set_auth_data(&auth_data);
 

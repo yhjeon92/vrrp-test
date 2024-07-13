@@ -1,10 +1,8 @@
 use std::{
-    io::{IoSlice, IoSliceMut},
-    mem::size_of,
-    net::Ipv4Addr,
-    os::fd::{AsRawFd, OwnedFd},
+    convert::TryInto, io::{IoSlice, IoSliceMut}, mem::size_of, net::Ipv4Addr, os::fd::{AsRawFd, OwnedFd}
 };
 
+use log::{debug, error, warn};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr};
 
 use crate::{
@@ -20,6 +18,13 @@ use crate::{
 struct IfrFlags {
     _ifr_name: [u8; 16],
     ifr_flags: i16,
+}
+
+pub fn get_if_index(if_name: &str) -> Result<u32, String> {
+    match nix::net::if_::if_nametoindex(if_name) {
+        Ok(index) => Ok(index),
+        Err(errno) => Err(errno.to_string()),
+    }
 }
 
 pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), String> {
@@ -83,7 +88,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
         }
     };
 
-    let if_ind = match nix::net::if_::if_nametoindex(if_name) {
+    let if_ind = match get_if_index(if_name) {
         Ok(ind) => ind,
         Err(err) => {
             return Err(err.to_string());
@@ -117,7 +122,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
         .to_bytes(&mut Vec::from(address.octets())),
     );
 
-    let if_label = format!("{}:0001", if_name);
+    let if_label = format!("{}:1", if_name);
 
     payload_bytes.append(
         &mut NetLinkAttributeHeader::new(
@@ -148,38 +153,48 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
     ) {
         Ok(_len) => {}
         Err(err) => {
-            println!("[ERROR] {}", err.to_string());
+            error!("[ERROR] {}", err.to_string());
         }
     }
 
-    let mut dummy: [u8; 1024] = [0u8; 1024];
-    let recv_iovec_mut = IoSliceMut::new(&mut dummy);
+    let mut recv_buf: [u8; 1024] = [0u8; 1024];
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let recv_result = match recvmsg::<NetlinkAddr>(
+    let resp_len = match recvmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
-        &mut [recv_iovec_mut],
+        &mut [IoSliceMut::new(&mut recv_buf)],
         Some(&mut recv_cmsg_buf),
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
     ) {
         Ok(data) => {
-            for ind in 0..data.bytes {
-                print!("{:02X?} ", dummy[ind]);
-            }
-            println!();
-            match String::from_utf8(recv_cmsg_buf) {
-                Ok(decoded) => decoded,
-                Err(err) => {
-                    println!("Parsing ERR {}", err.to_string());
-                    return Err(err.to_string());
-                }
-            }
+            // match String::from_utf8(recv_cmsg_buf) {
+            //     Ok(decoded) => decoded,
+            //     Err(err) => {
+            //         warn!("Parsing ERR {}", err.to_string());
+            //         return Err(err.to_string());
+            //     }
+            // }
+            data.bytes
         }
         Err(err) => {
-            println!("ERR {}", err.to_string());
             return Err(err.to_string());
         }
     };
 
-    Ok(())
+    debug!("Bytes received: ");
+    debug!("{}", recv_buf[0..resp_len].iter().map(|byte| format!("{:02X?} ", byte)).collect::<String>());
+
+    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
+
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+        Some(hdr) => hdr,
+        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0)
+    };
+
+    nl_resp_hdr.print();
+
+    match i32::from_ne_bytes(recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE+4].try_into().unwrap()) {
+        0 => Ok(()),
+        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string())
+    }
 }

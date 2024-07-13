@@ -60,6 +60,14 @@ pub struct NetLinkMessageHeader {
 }
 
 impl NetLinkMessageHeader {
+    pub fn print(&self) {
+        println!("\tnlmsg_len {}", self.msg_len);
+        println!("\tnlmsg_type {}", self.msg_type);
+        println!("\tnlmsg_flags {}", self.msg_flags);
+        println!("\tnlmsg_seq {}", self.msg_seq);
+        println!("\tnlmsg_pid {}", self.msg_pid);
+    }
+
     pub fn from_slice(buf: &[u8]) -> Option<NetLinkMessageHeader> {
         if buf.len() < size_of::<NetLinkMessageHeader>() {
             None

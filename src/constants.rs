@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 
+// Socket
 pub const AF_INET: i32 = 0x02;
 pub const _AF_NETLINK: u16 = 0x10;
 pub const AF_PACKET: i32 = 0x11;
@@ -48,6 +49,8 @@ pub const IFA_LABEL: u16 = 3;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 
+// VRRPV2
+pub const VRRP_HDR_LEN: usize = 28;
 pub const VRRP_MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 18);
 
 pub const VIRTUAL_ROUTER_MAC: [u8; 6] = [0, 0, 94, 0, 1, 0];

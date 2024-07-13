@@ -14,7 +14,7 @@ use crate::{
 use nix::{
     libc::socket,
     sys::socket::{
-        self, bind, getsockname, setsockopt, sockopt, IpMembershipRequest, LinkAddr, SockFlag,
+        self, bind, setsockopt, sockopt, IpMembershipRequest, SockFlag,
         SockProtocol, SockaddrIn,
     },
 };
