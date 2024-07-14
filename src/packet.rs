@@ -1,5 +1,6 @@
 use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 
+use log::{debug, error};
 use serde::Deserialize;
 
 use crate::constants::{
@@ -61,11 +62,11 @@ pub struct NetLinkMessageHeader {
 
 impl NetLinkMessageHeader {
     pub fn print(&self) {
-        println!("\tnlmsg_len {}", self.msg_len);
-        println!("\tnlmsg_type {}", self.msg_type);
-        println!("\tnlmsg_flags {}", self.msg_flags);
-        println!("\tnlmsg_seq {}", self.msg_seq);
-        println!("\tnlmsg_pid {}", self.msg_pid);
+        debug!("\tnlmsg_len {}", self.msg_len);
+        debug!("\tnlmsg_type {}", self.msg_type);
+        debug!("\tnlmsg_flags {}", self.msg_flags);
+        debug!("\tnlmsg_seq {}", self.msg_seq);
+        debug!("\tnlmsg_pid {}", self.msg_pid);
     }
 
     pub fn from_slice(buf: &[u8]) -> Option<NetLinkMessageHeader> {
@@ -297,18 +298,18 @@ impl VrrpV2Packet {
     }
 
     pub fn print(&self) {
-        println!("\tVRRP Ver:  {}", self.ver_type >> 4);
-        println!("\tVRRP Type: {}", self.ver_type & 0xF);
-        println!("\tSource:    {}", Ipv4Addr::from(self.ip_src));
-        println!("\tRouterId:  {}", self.router_id);
-        println!("\tPriority:  {}", self.priority);
-        println!("\tAuthType:  {}", self.auth_type);
-        println!("\tInterval:  {}", self.advert_int);
-        println!("\tVIP count: {}", self.cnt_ip_addr);
+        debug!("\tVRRP Ver:  {}", self.ver_type >> 4);
+        debug!("\tVRRP Type: {}", self.ver_type & 0xF);
+        debug!("\tSource:    {}", Ipv4Addr::from(self.ip_src));
+        debug!("\tRouterId:  {}", self.router_id);
+        debug!("\tPriority:  {}", self.priority);
+        debug!("\tAuthType:  {}", self.auth_type);
+        debug!("\tInterval:  {}", self.advert_int);
+        debug!("\tVIP count: {}", self.cnt_ip_addr);
         for ind in 0..self.vip_addresses.len() {
-            println!("\t\t{}", self.vip_addresses[ind].to_string());
+            debug!("\t\t{}", self.vip_addresses[ind].to_string());
         }
-        println!(
+        debug!(
             "\tAuthData:  {}",
             String::from_utf8_lossy(self.auth_data.as_slice())
         );
@@ -319,7 +320,7 @@ impl VrrpV2Packet {
         match self.calculate_checksum() {
             Ok(_) => {}
             Err(err) => {
-                println!("[ERROR] {}", err.to_string());
+                error!("Error while calculating packet checksum: {}", err.to_string());
                 return Vec::new();
             }
         }

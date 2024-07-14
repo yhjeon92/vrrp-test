@@ -153,7 +153,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
     ) {
         Ok(_len) => {}
         Err(err) => {
-            error!("[ERROR] {}", err.to_string());
+            error!("Socket sendmsg() failed: {}", err.to_string());
         }
     }
 
@@ -167,13 +167,6 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
     ) {
         Ok(data) => {
-            // match String::from_utf8(recv_cmsg_buf) {
-            //     Ok(decoded) => decoded,
-            //     Err(err) => {
-            //         warn!("Parsing ERR {}", err.to_string());
-            //         return Err(err.to_string());
-            //     }
-            // }
             data.bytes
         }
         Err(err) => {

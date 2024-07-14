@@ -114,7 +114,7 @@ impl Router {
         let advert_pkt = match self.build_packet() {
             Some(pkt) => pkt.clone(),
             _ => {
-                error!("[ERROR] failed to build VRRP advertisement packet");
+                error!("Failed to build VRRP advertisement packet");
                 return;
             }
         };
@@ -219,7 +219,7 @@ impl Router {
                                         ) {
                                             Ok(_) => {}
                                             Err(err) => {
-                                                error!("[ERROR] {}", err);
+                                                error!("Failed to add IP address {} to interface {}: {}", self.virtual_ip.to_string(), &self.if_name, err);
                                             }
                                         }
 
@@ -277,7 +277,7 @@ impl Router {
                                 {
                                     Ok(_) => {}
                                     Err(err) => {
-                                        error!("[ERROR] {}", err);
+                                        error!("Failed to add IP address {} to interface {}: {}", self.virtual_ip.to_string(), &self.if_name, err);
                                     }
                                 }
 
@@ -349,45 +349,6 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
 
     unsafe {
         debug!("interface {} len {}", if_name, if_name.len());
-
-        // let if_index = match nix::net::if_::if_nameindex() {
-        //     Ok(ifs) => {
-        //         let mut index: i32 = -1;
-        //         for interface in ifs.iter() {
-        //             let if_name_target = match interface.name().to_str() {
-        //                 Ok(name) => name,
-        //                 Err(err) => {
-        //                     println!("Error.. {}", err.to_string());
-        //                     return;
-        //                 }
-        //             };
-
-        //             println!(
-        //                 "Interface {} Len {}",
-        //                 if_name_target,
-        //                 interface.name().len()
-        //             );
-
-        //             if if_name.eq(if_name_target) {
-        //                 index = interface.index() as i32;
-        //                 println!("Found interface {}", if_name);
-        //                 break;
-        //             }
-        //         }
-
-        //         match index {
-        //             -1 => {
-        //                 println!("Error..");
-        //                 return;
-        //             }
-        //             ind => ind as usize,
-        //         }
-        //     }
-        //     Err(err) => {
-        //         println!("[ERROR] {}", err.to_string());
-        //         return;
-        //     }
-        // };
 
         let if_index = match get_if_index(&if_name) {
             Ok(ind) => ind,

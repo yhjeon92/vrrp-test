@@ -84,7 +84,7 @@ async fn main() {
             let mut file = match File::open(args.config_file_path) {
                 Ok(file) => file,
                 Err(err) => {
-                    error!("[ERROR] while opening config file: {}", err.to_string());
+                    error!("Failed to open configuration file: {}", err.to_string());
                     return;
                 }
             };
@@ -92,7 +92,7 @@ async fn main() {
             match file.read_to_string(&mut contents) {
                 Ok(_) => (),
                 Err(err) => {
-                    error!("[ERROR] while reading config file: {}", err.to_string());
+                    error!("Failed to read from configuration file: {}", err.to_string());
                     return;
                 }
             };
@@ -108,7 +108,7 @@ async fn main() {
                 }
                 Err(err) => {
                     error!(
-                        "[ERROR] while parsing configuration file: {}",
+                        "Failed to parse configuration file: {}",
                         err.to_string()
                     );
                     return;
@@ -122,7 +122,7 @@ async fn main() {
         true => CONFIG.load_full().interface.clone(),
         false => match args.interface.is_empty() {
             true => {
-                error!("[ERROR] Network interface name must be specified with -i flag in Readonly mode");
+                error!("Network interface name must be specified with -i flag in Readonly mode");
                 return;
             }
             false => args.interface,
@@ -132,7 +132,7 @@ async fn main() {
     let sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
         Err(err) => {
-            error!("[ERROR] while opening socket: {}", err.to_string());
+            error!("Failed to open a socket: {}, exiting...", err.to_string());
             return;
         }
     };
@@ -150,7 +150,7 @@ async fn main() {
         let arp_sock_fd = match open_arp_socket(&if_name) {
             Ok(fd) => fd,
             Err(err) => {
-                error!("[ERROR] while opening arp socket: {}", err.to_string());
+                error!("Failed to open an arp socket: {}, exiting...", err.to_string());
                 return;
             }
         };
@@ -161,7 +161,7 @@ async fn main() {
                 Ok(cloned_fd) => cloned_fd,
                 Err(err) => {
                     error!(
-                        "[ERROR] Cloning fd {} failed: {}",
+                        "Failed to clone a file descriptor {}: {}, exiting...",
                         sock_fd.as_raw_fd(),
                         err.to_string()
                     );
@@ -174,7 +174,7 @@ async fn main() {
         ) {
             Ok(router) => router,
             Err(err) => {
-                error!("[ERROR] failed to initialize a router: {}", err);
+                error!("Failed to initialize a router: {}, exiting...", err);
                 return;
             }
         };
@@ -191,7 +191,7 @@ async fn main() {
             let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
                 Ok(pkt) => pkt,
                 Err(err) => {
-                    error!("[ERROR] {}", err.to_string());
+                    error!("{}", err.to_string());
                     continue;
                 }
             };
@@ -202,22 +202,15 @@ async fn main() {
 
             match vrrp_pkt.verify_checksum() {
                 Ok(_) => {
-                    // vrrp_pkt.print();
-
-                    // match tx.blocking_send(Event::AdvertReceived(
-                    //     router_id,
-                    //     priority,
-                    //     Ipv4Addr::from(src_addr),
-                    // )) {
-                    //     Ok(_) => (),
-                    //     Err(err) => {
-                    //         error!("[ERROR], {}", err.to_string());
-                    //     }
-                    // };
-                    _ = tx.send(Event::AdvertReceived(router_id, priority, Ipv4Addr::from(src_addr))).await;
+                    match tx.send(Event::AdvertReceived(router_id, priority, Ipv4Addr::from(src_addr))).await {
+                        Ok(()) => {},
+                        Err(err) => {
+                            error!("Failed to send event: {}", err.to_string());
+                        },
+                    }
                 }
                 Err(err) => {
-                    error!("[ERROR] {}", err);
+                    warn!("Invalid VRRP packet received: {}", err);
                 }
             }
         }
@@ -227,7 +220,7 @@ async fn main() {
             let vrrp_pkt = match recv_vrrp_packet(&sock_fd, &mut pkt_buf) {
                 Ok(pkt) => pkt,
                 Err(err) => {
-                    error!("[ERROR] {}", err.to_string());
+                    error!("{}", err.to_string());
                     continue;
                 }
             };
@@ -237,7 +230,7 @@ async fn main() {
                     vrrp_pkt.print();
                 }
                 Err(err) => {
-                    error!("[ERROR] {}", err);
+                    error!("Invalid VRRP packet received: {}", err);
                 }
             }
         }
@@ -250,7 +243,7 @@ fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packe
             pkt_len
         }
         Err(err) => {
-            return Err(format!("[ERROR] {}", err.to_string()));
+            return Err(format!("recvfrom() error: {}", err.to_string()));
         }
     };
 
