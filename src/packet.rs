@@ -145,7 +145,7 @@ impl NetLinkAttributeHeader {
         NetLinkAttributeHeader { nla_len, nla_type }
     }
 
-    pub fn from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
+    pub fn _from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
         if buf.len() < size_of::<NetLinkAttributeHeader>() {
             None
         } else {
@@ -320,7 +320,10 @@ impl VrrpV2Packet {
         match self.calculate_checksum() {
             Ok(_) => {}
             Err(err) => {
-                error!("Error while calculating packet checksum: {}", err.to_string());
+                error!(
+                    "Error while calculating packet checksum: {}",
+                    err.to_string()
+                );
                 return Vec::new();
             }
         }

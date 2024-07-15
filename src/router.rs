@@ -17,10 +17,10 @@ use once_cell::sync::Lazy;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    config::VRouterConfig,
     constants::{AF_PACKET, ETH_PROTO_ARP},
     interface::{add_ip_address, get_if_index},
-    packet::GarpPacket,
-    VrrpV2Packet, CONFIG,
+    packet::{GarpPacket, VrrpV2Packet},
 };
 
 pub enum State {
@@ -35,14 +35,13 @@ impl fmt::Display for State {
             State::Initialize => write!(f, "Initialize"),
             State::Backup => write!(f, "Backup"),
             State::Master => write!(f, "Master"),
-            _ => write!(f, "Unknown"),
         }
     }
 }
 
 pub enum Event {
     Startup,
-    ShutDown,
+    _ShutDown,
     MasterDown,
     // RouterId - Priority - Source
     AdvertReceived(u8, u8, Ipv4Addr),
@@ -86,14 +85,13 @@ impl Router {
         arp_sock_fd: OwnedFd,
         tx: Sender<Event>,
         rx: Receiver<Event>,
+        config: VRouterConfig,
     ) -> Result<Router, String> {
-        let config = CONFIG.load_full();
-
         Ok(Router {
             state: State::Initialize,
-            if_name: if_name,
+            if_name,
             sock_fd: advert_sock_fd,
-            arp_sock_fd: arp_sock_fd,
+            arp_sock_fd,
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
@@ -108,7 +106,7 @@ impl Router {
     }
 
     // RFC 3768 Protocol State Machine
-    pub async fn start(&mut self) {
+    pub fn start(&mut self) {
         info!("Router thread running...");
 
         let advert_pkt = match self.build_packet() {
@@ -123,8 +121,7 @@ impl Router {
 
         // main router loop
         loop {
-            // match self.router_rx.blocking_recv() {
-            match self.router_rx.recv().await {
+            match self.router_rx.blocking_recv() {
                 Some(event) => {
                     info!("{}", event);
 
@@ -213,10 +210,7 @@ impl Router {
                                         );
 
                                         // TODO: Set Virtual IP to an interface
-                                        match add_ip_address(
-                                            &self.if_name,
-                                            self.virtual_ip,
-                                        ) {
+                                        match add_ip_address(&self.if_name, self.virtual_ip) {
                                             Ok(_) => {}
                                             Err(err) => {
                                                 error!("Failed to add IP address {} to interface {}: {}", self.virtual_ip.to_string(), &self.if_name, err);
@@ -273,11 +267,15 @@ impl Router {
                                 );
 
                                 // TODO: Set Virtual IP to an interface
-                                match add_ip_address(&self.if_name, self.virtual_ip)
-                                {
+                                match add_ip_address(&self.if_name, self.virtual_ip) {
                                     Ok(_) => {}
                                     Err(err) => {
-                                        error!("Failed to add IP address {} to interface {}: {}", self.virtual_ip.to_string(), &self.if_name, err);
+                                        error!(
+                                            "Failed to add IP address {} to interface {}: {}",
+                                            self.virtual_ip.to_string(),
+                                            &self.if_name,
+                                            err
+                                        );
                                     }
                                 }
 
@@ -288,7 +286,7 @@ impl Router {
                                 // TODO
                             }
                         },
-                        Event::ShutDown => match self.state {
+                        Event::_ShutDown => match self.state {
                             State::Backup => {
                                 // Stop MasterDown timer
                                 self.state = State::Initialize;
@@ -334,12 +332,11 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
         &SockaddrIn::new(224, 0, 0, 18, 112),
         MsgFlags::empty(),
     ) {
-        Ok(_) => {}
+        Ok(_) => {
+            debug!("Sent VRRP advertisement");
+        }
         Err(err) => {
-            warn!(
-                "Failed to send VRRP advertisement: {}",
-                err.to_string()
-            );
+            warn!("Failed to send VRRP advertisement: {}", err.to_string());
         }
     }
 }

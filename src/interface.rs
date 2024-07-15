@@ -1,8 +1,12 @@
 use std::{
-    convert::TryInto, io::{IoSlice, IoSliceMut}, mem::size_of, net::Ipv4Addr, os::fd::{AsRawFd, OwnedFd}
+    convert::TryInto,
+    io::{IoSlice, IoSliceMut},
+    mem::size_of,
+    net::Ipv4Addr,
+    os::fd::{AsRawFd, OwnedFd},
 };
 
-use log::{debug, error, warn};
+use log::{debug, error};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr};
 
 use crate::{
@@ -166,28 +170,36 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
         Some(&mut recv_cmsg_buf),
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
     ) {
-        Ok(data) => {
-            data.bytes
-        }
+        Ok(data) => data.bytes,
         Err(err) => {
             return Err(err.to_string());
         }
     };
 
     debug!("Bytes received: ");
-    debug!("{}", recv_buf[0..resp_len].iter().map(|byte| format!("{:02X?} ", byte)).collect::<String>());
+    debug!(
+        "{}",
+        recv_buf[0..resp_len]
+            .iter()
+            .map(|byte| format!("{:02X?} ", byte))
+            .collect::<String>()
+    );
 
     const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
 
     let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
         Some(hdr) => hdr,
-        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0)
+        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
     };
 
     nl_resp_hdr.print();
 
-    match i32::from_ne_bytes(recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE+4].try_into().unwrap()) {
+    match i32::from_ne_bytes(
+        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+            .try_into()
+            .unwrap(),
+    ) {
         0 => Ok(()),
-        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string())
+        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string()),
     }
 }
