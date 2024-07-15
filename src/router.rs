@@ -17,10 +17,10 @@ use once_cell::sync::Lazy;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
-    config::VRouterConfig,
     constants::{AF_PACKET, ETH_PROTO_ARP},
     interface::{add_ip_address, get_if_index},
     packet::{GarpPacket, VrrpV2Packet},
+    VRouterConfig,
 };
 
 pub enum State {
