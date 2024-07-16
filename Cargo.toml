@@ -14,4 +14,5 @@ arc-swap = "1.7.1"
 once_cell = "1.19.0"
 log = "0.4"
 env_logger = "0.11"
-tokio = { version = "1.38.0", features = ["sync"] }
+tokio = { version = "1.38.0", features = ["sync", "macros", "rt"] }
+futures = "0.3"

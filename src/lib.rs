@@ -130,7 +130,7 @@ pub fn start_virtual_router(config: VRouterConfig) {
         }
     };
 
-    thread::spawn(move || router.start());
+    thread::spawn(move || _ = futures::executor::block_on(router.start()));
 
     _ = tx.blocking_send(Event::Startup);
 
@@ -220,7 +220,7 @@ pub async fn start_virtual_router_async(config: VRouterConfig) {
         }
     };
 
-    thread::spawn(move || router.start());
+    thread::spawn(move || _ = futures::executor::block_on(router.start()));
 
     _ = tx.send(Event::Startup).await;
 
