@@ -7,16 +7,13 @@ use std::{
 };
 
 use log::{debug, error, info, warn};
-use nix::{
-    libc::{sockaddr, sockaddr_ll},
-    sys::socket::{LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
-};
+use nix::sys::socket::{MsgFlags, SockaddrIn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::{
-    constants::{AF_PACKET, ETH_PROTO_ARP},
-    interface::{add_ip_address, del_ip_address, get_if_index},
-    packet::{GarpPacket, VrrpV2Packet},
+    interface::{add_ip_address, del_ip_address},
+    packet::VrrpV2Packet,
+    socket::send_gratuitous_arp,
     VRouterConfig,
 };
 
@@ -254,6 +251,17 @@ impl Router {
                                             advert_pkt.clone(),
                                         );
                                         // Set advert timer to advert_int
+                                        match advert_timer_tx {
+                                            Some(ref tx) => {
+                                                _ = tx
+                                                    .send(TimerEvent::ResetInterval(
+                                                        self.advert_int as f32,
+                                                    ))
+                                                    .await;
+                                            }
+                                            None => { /* */ }
+                                        }
+                                        // TODO: or priority is equal to local priority AND sender ip addr is greater than local ip addr
                                     } else if !self.preempt_mode || priority > self.priority {
                                         // Delete virtual ip bound to interface
                                         match del_ip_address(&self.if_name, self.virtual_ip) {
@@ -352,6 +360,17 @@ impl Router {
                                 info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
                             }
+                            State::Master => {
+                                // Stop advert timer
+                                match advert_timer_tx {
+                                    Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
+                                    None => { /* */ }
+                                };
+                                // TODO: Send an advert with priority = 0
+                                // Demote to initialize state
+                                info!("Demoting to INITIALIZE state..");
+                                self.state = State::Initialize;
+                            }
                             _ => {}
                         },
                     };
@@ -397,66 +416,6 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
         }
         Err(err) => {
             warn!("Failed to send VRRP advertisement: {}", err.to_string());
-        }
-    }
-}
-
-pub fn send_gratuitous_arp(
-    sock_fd: i32,
-    if_name: String,
-    router_id: u8,
-    virtual_ip: (Ipv4Addr, u8),
-) {
-    let mut pkt = GarpPacket::new(virtual_ip.0, router_id);
-
-    unsafe {
-        debug!("interface {} len {}", if_name, if_name.len());
-
-        let if_index = match get_if_index(&if_name) {
-            Ok(ind) => ind,
-            Err(err) => {
-                error!("{}", err);
-                return;
-            }
-        };
-
-        debug!("IF_INDEX {}", if_index);
-
-        let mut sock_addr = nix::libc::sockaddr_ll {
-            sll_family: AF_PACKET as u16,
-            sll_protocol: ETH_PROTO_ARP as u16,
-            sll_ifindex: if_index as i32,
-            sll_hatype: 0,
-            sll_pkttype: 0,
-            sll_halen: 0,
-            sll_addr: [0; 8],
-        };
-
-        let ptr_sockaddr = core::mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sock_addr);
-
-        let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
-            Some(addr) => addr,
-            None => {
-                error!("Failed to construct sockaddr");
-                return;
-            }
-        };
-
-        match nix::sys::socket::sendto(
-            sock_fd.as_raw_fd(),
-            &pkt.to_bytes().as_slice(),
-            &sock_addr,
-            MsgFlags::empty(),
-        ) {
-            Ok(size) => {
-                info!("Sent a GARP of len {}", size);
-            }
-            Err(err) => {
-                warn!(
-                    "An error was encountered while sending GARP request! {}",
-                    err.to_string()
-                );
-            }
         }
     }
 }

@@ -15,6 +15,7 @@ struct Args {
     /// Path to the virtual router config file, defaults to vrrp.toml in working dir. Required for Virtual Router mode only.
     #[arg(short, default_value_t = String::from("vrrp.toml"))]
     config_file_path: String,
+    /// Enable verbose log output.
     #[arg(short('v'), default_value_t = false)]
     verbose: bool,
 }
@@ -27,8 +28,6 @@ fn main() {
 
     match args.router {
         true => {
-            // start_virutal_router(&args.config_file_path);
-            // let runtime = match Builder::new_current_thread()
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(5)

@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, thread};
+use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr};
 
 use log::{error, info, warn};
 use packet::VrrpV2Packet;
@@ -88,107 +88,6 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
             None
         }
     }
-}
-
-pub fn start_vrouter(config: VRouterConfig) {
-    let if_name = config.interface.clone();
-    let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!("Failed to open a socket: {}, exiting...", err.to_string());
-            return;
-        }
-    };
-
-    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
-
-    let (tx, rx) = mpsc::channel::<Event>(size_of::<Event>());
-
-    let arp_sock_fd = match open_arp_socket(&if_name) {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!(
-                "Failed to open an arp socket: {}, exiting...",
-                err.to_string()
-            );
-            return;
-        }
-    };
-
-    let mut router = match Router::new(
-        if_name,
-        match vrrp_sock_fd.try_clone() {
-            Ok(fd) => fd,
-            Err(err) => {
-                error!("Failed to clone socket fd: {}, exiting...", err.to_string());
-                return;
-            }
-        },
-        arp_sock_fd,
-        tx.clone(),
-        rx,
-        config,
-    ) {
-        Ok(router) => router,
-        Err(err) => {
-            error!(
-                "Failed to initialize a router: {}, exiting...",
-                err.to_string()
-            );
-            return;
-        }
-    };
-
-    thread::spawn(move || _ = futures::executor::block_on(router.start()));
-
-    _ = tx.blocking_send(Event::Startup);
-
-    info!("Router Startup");
-    info!("Listening for vRRPv2 packets...");
-
-    // Main Loop
-    loop {
-        let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-            Ok(pkt) => pkt,
-            Err(err) => {
-                error!("{}", err.to_string());
-                continue;
-            }
-        };
-
-        let router_id = vrrp_pkt.router_id;
-        let priority = vrrp_pkt.priority;
-        let src_addr = vrrp_pkt.ip_src.clone();
-
-        match vrrp_pkt.verify_checksum() {
-            Ok(_) => {
-                match tx.blocking_send(Event::AdvertReceived(
-                    router_id,
-                    priority,
-                    Ipv4Addr::from(src_addr),
-                )) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        error!("Failed to send event: {}", err.to_string());
-                    }
-                }
-            }
-            Err(err) => {
-                warn!("Invalid VRRP packet received: {}", err);
-            }
-        }
-    }
-}
-
-pub fn start_vrouter_cfile(config_file_path: &str) {
-    let config = match read_config(config_file_path) {
-        Some(config) => config,
-        None => {
-            return;
-        }
-    };
-
-    start_vrouter(config);
 }
 
 pub async fn start_vrouter_async(config: VRouterConfig) {
