@@ -12,7 +12,7 @@ use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr};
 use crate::{
     constants::{
         AF_INET, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING,
-        IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_NEWADDR,
+        IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
         RT_SCOPE_UNIVERSE,
     },
     packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
@@ -84,7 +84,7 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), Str
     }
 }
 
-pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
+pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
@@ -109,13 +109,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
 
     let mut payload_bytes = Vec::<u8>::new();
 
-    let ifa_msg = IfAddrMessage::new(
-        AF_INET as u8,
-        size_of::<NetLinkMessageHeader>() as u8,
-        0u8,
-        RT_SCOPE_UNIVERSE,
-        if_ind,
-    );
+    let ifa_msg = IfAddrMessage::new(AF_INET as u8, address.1, 0u8, RT_SCOPE_UNIVERSE, if_ind);
 
     payload_bytes.append(&mut ifa_msg.to_bytes());
     payload_bytes.append(
@@ -123,7 +117,7 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_LOCAL,
         )
-        .to_bytes(&mut Vec::from(address.octets())),
+        .to_bytes(&mut Vec::from(address.0.octets())),
     );
 
     let if_label = format!("{}:1", if_name);
@@ -141,7 +135,115 @@ pub fn add_ip_address(if_name: &str, address: Ipv4Addr) -> Result<(), String> {
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_ADDRESS,
         )
-        .to_bytes(&mut Vec::from(address.octets())),
+        .to_bytes(&mut Vec::from(address.0.octets())),
+    );
+
+    let cmsg: [ControlMessage; 0] = [];
+
+    let netlink_addr = NetlinkAddr::new(0, 0);
+
+    match sendmsg::<NetlinkAddr>(
+        nl_sock_fd.as_raw_fd(),
+        &[IoSlice::new(nl_msg.to_bytes(&mut payload_bytes).as_slice())],
+        &cmsg,
+        MsgFlags::empty(),
+        Some(&netlink_addr),
+    ) {
+        Ok(_len) => {}
+        Err(err) => {
+            error!("Socket sendmsg() failed: {}", err.to_string());
+        }
+    }
+
+    let mut recv_buf: [u8; 1024] = [0u8; 1024];
+    let mut recv_cmsg_buf = Vec::<u8>::new();
+
+    let resp_len = match recvmsg::<NetlinkAddr>(
+        nl_sock_fd.as_raw_fd(),
+        &mut [IoSliceMut::new(&mut recv_buf)],
+        Some(&mut recv_cmsg_buf),
+        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+    ) {
+        Ok(data) => data.bytes,
+        Err(err) => {
+            return Err(err.to_string());
+        }
+    };
+
+    debug!("Bytes received: ");
+    debug!(
+        "{}",
+        recv_buf[0..resp_len]
+            .iter()
+            .map(|byte| format!("{:02X?} ", byte))
+            .collect::<String>()
+    );
+
+    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
+
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+        Some(hdr) => hdr,
+        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
+    };
+
+    nl_resp_hdr.print();
+
+    match i32::from_ne_bytes(
+        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+            .try_into()
+            .unwrap(),
+    ) {
+        0 => Ok(()),
+        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string()),
+    }
+}
+
+pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), String> {
+    let nl_sock_fd = match open_netlink_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    let if_ind = match get_if_index(if_name) {
+        Ok(ind) => ind,
+        Err(err) => {
+            return Err(err.to_string());
+        }
+    };
+
+    let mut nl_msg = NetLinkMessageHeader::new(0, RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK, 0, 0);
+
+    let mut payload_bytes = Vec::<u8>::new();
+
+    let ifa_msg = IfAddrMessage::new(AF_INET as u8, address.1, 0u8, RT_SCOPE_UNIVERSE, if_ind);
+
+    payload_bytes.append(&mut ifa_msg.to_bytes());
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + 4) as u16,
+            IFA_LOCAL,
+        )
+        .to_bytes(&mut Vec::from(address.0.octets())),
+    );
+
+    let if_label = format!("{}:1", if_name);
+
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + if_label.len() + 1) as u16,
+            IFA_LABEL,
+        )
+        .to_bytes(&mut Vec::from(if_label.as_bytes())),
+    );
+
+    payload_bytes.append(
+        &mut NetLinkAttributeHeader::new(
+            (size_of::<NetLinkAttributeHeader>() + 4) as u16,
+            IFA_ADDRESS,
+        )
+        .to_bytes(&mut Vec::from(address.0.octets())),
     );
 
     let cmsg: [ControlMessage; 0] = [];

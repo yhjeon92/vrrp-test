@@ -20,6 +20,7 @@ pub struct VRouterConfig {
     pub priority: u8,
     pub advert_int: u8,
     pub virtual_ip: Ipv4Addr,
+    pub netmask_len: u8,
 }
 
 impl VRouterConfig {
@@ -51,12 +52,20 @@ impl VRouterConfig {
 
         match toml::from_str::<VRouterConfig>(&contents) {
             Ok(config) => {
+                if config.netmask_len < 8 || config.netmask_len > 31 {
+                    error!("Invalid virtual ip netmask length {}", config.netmask_len);
+                    return None;
+                }
                 info!("Router configured:");
                 info!("\tInterface       {}", config.interface);
                 info!("\tRouter ID       {}", config.router_id);
                 info!("\tPriority        {}", config.priority);
                 info!("\tAdvert Interval {}s", config.advert_int);
-                info!("\tVirtual IP      {}", config.virtual_ip.to_string());
+                info!(
+                    "\tVirtual IP      {}/{}",
+                    config.virtual_ip.to_string(),
+                    config.netmask_len
+                );
                 Some(config)
             }
             Err(err) => {
@@ -75,13 +84,13 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
     match VRouterConfig::from_file(file_path) {
         Some(config) => Some(config),
         None => {
-            info!("Failed to construct a valid configuration settings. Exiting...");
+            error!("Failed to construct a valid configuration settings. Exiting...");
             None
         }
     }
 }
 
-pub fn start_virtual_router(config: VRouterConfig) {
+pub fn start_vrouter(config: VRouterConfig) {
     let if_name = config.interface.clone();
     let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
@@ -171,7 +180,18 @@ pub fn start_virtual_router(config: VRouterConfig) {
     }
 }
 
-pub async fn start_virtual_router_async(config: VRouterConfig) {
+pub fn start_vrouter_cfile(config_file_path: &str) {
+    let config = match read_config(config_file_path) {
+        Some(config) => config,
+        None => {
+            return;
+        }
+    };
+
+    start_vrouter(config);
+}
+
+pub async fn start_vrouter_async(config: VRouterConfig) {
     let if_name = config.interface.clone();
     let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
@@ -220,7 +240,7 @@ pub async fn start_virtual_router_async(config: VRouterConfig) {
         }
     };
 
-    thread::spawn(move || _ = futures::executor::block_on(router.start()));
+    tokio::spawn(async move { router.start().await });
 
     _ = tx.send(Event::Startup).await;
 
@@ -264,7 +284,7 @@ pub async fn start_virtual_router_async(config: VRouterConfig) {
     }
 }
 
-pub fn start_virutal_router(config_file_path: &str) {
+pub async fn start_vrouter_cfile_async(config_file_path: &str) {
     let config = match read_config(config_file_path) {
         Some(config) => config,
         None => {
@@ -272,7 +292,7 @@ pub fn start_virutal_router(config_file_path: &str) {
         }
     };
 
-    start_virtual_router(config);
+    start_vrouter_async(config).await;
 }
 
 pub fn start_vrrp_listener(if_name: String) {

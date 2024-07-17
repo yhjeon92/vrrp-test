@@ -27,6 +27,7 @@ pub const NLMSG_ALIGNTO: u32 = 4;
 
 // Message Types (rtnetlink)
 pub const RTM_NEWADDR: u16 = 0x14;
+pub const RTM_DELADDR: u16 = 0x15;
 // Message Types (netlink)
 pub const _NLMSG_ERROR: u16 = 0x02;
 

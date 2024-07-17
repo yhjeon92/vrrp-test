@@ -3,27 +3,19 @@ use std::{
     mem::size_of,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
-    sync::Arc,
-    thread::{self},
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
-use futures::FutureExt;
 use log::{debug, error, info, warn};
 use nix::{
     libc::{sockaddr, sockaddr_ll},
     sys::socket::{LinkAddr, MsgFlags, SockaddrIn, SockaddrLike},
 };
-use once_cell::sync::Lazy;
-use tokio::{
-    select,
-    sync::mpsc::{Receiver, Sender},
-};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::{
     constants::{AF_PACKET, ETH_PROTO_ARP},
-    interface::{add_ip_address, get_if_index},
+    interface::{add_ip_address, del_ip_address, get_if_index},
     packet::{GarpPacket, VrrpV2Packet},
     VRouterConfig,
 };
@@ -50,7 +42,6 @@ pub enum Event {
     MasterDown,
     // RouterId - Priority - Source
     AdvertReceived(u8, u8, Ipv4Addr),
-    AdvertTimeout,
 }
 
 impl fmt::Display for Event {
@@ -65,7 +56,6 @@ impl fmt::Display for Event {
                 prior,
                 src_addr.to_string()
             ),
-            Event::AdvertTimeout => write!(f, "AdvertTimeout"),
             _ => write!(f, "Unknown"),
         }
     }
@@ -74,6 +64,7 @@ impl fmt::Display for Event {
 enum TimerEvent {
     ResetTimer,
     ResetInterval(f32),
+    Abort,
 }
 
 impl fmt::Display for TimerEvent {
@@ -83,11 +74,12 @@ impl fmt::Display for TimerEvent {
             TimerEvent::ResetInterval(int) => {
                 write!(f, "ResetInterval {}s", int)
             }
+            TimerEvent::Abort => {
+                write!(f, "Abort")
+            }
         }
     }
 }
-
-static MASTER_HEALTHY: Lazy<ArcSwap<bool>> = Lazy::new(|| ArcSwap::from_pointee(false));
 
 pub struct Router {
     state: State,
@@ -100,7 +92,7 @@ pub struct Router {
     master_down_int: f32,
     skew_time: f32,
     preempt_mode: bool,
-    virtual_ip: Ipv4Addr,
+    virtual_ip: (Ipv4Addr, u8),
     router_tx: Sender<Event>,
     router_rx: Receiver<Event>,
 }
@@ -126,7 +118,7 @@ impl Router {
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             preempt_mode: true,
-            virtual_ip: config.virtual_ip,
+            virtual_ip: (config.virtual_ip, config.netmask_len),
             router_tx: tx,
             router_rx: rx,
         })
@@ -146,117 +138,22 @@ impl Router {
 
         info!("MASTER DOWN INTERVAL set to {}", self.master_down_int);
 
-        // TODO: TEST
-        let (advert_timer_tx, mut advert_timer_rx) =
-            tokio::sync::mpsc::channel::<TimerEvent>(99999);
-
-        let timer_int = self.master_down_int.clone();
-        let timer_tx = self.router_tx.clone();
-
-        let mut master_timer_jh = thread::spawn(move || {
-            _ = futures::executor::block_on(master_down_timer(
-                timer_int,
-                timer_tx,
-                advert_timer_rx,
-            ));
-        });
-
-        // let mut master_timer_jh: JoinHandle<()> = tokio::task::spawn(master_down_timer(
-        //     self.master_down_int,
-        //     self.router_tx.clone(),
-        //     advert_recv,
-        // ));
+        let mut master_timer_tx: Option<Sender<TimerEvent>> = None;
+        let mut advert_timer_tx: Option<Sender<TimerEvent>> = None;
 
         // main router loop
         loop {
-            // match self.router_rx.blocking_recv() {
             match self.router_rx.recv().await {
                 Some(event) => {
-                    info!("{}", event);
+                    debug!("{}", event);
 
                     match event {
-                        Event::AdvertReceived(router_id, priority, src_addr) => match self.state {
-                            State::Backup => {
-                                info!(
-                                    "\tAdvert router id {} - priority {} - src {}",
-                                    router_id,
-                                    priority,
-                                    src_addr.to_string()
-                                );
-
-                                if router_id == self.router_id {
-                                    if priority == 0 {
-                                        MASTER_HEALTHY.store(Arc::new(false));
-
-                                        // TODO: timer test
-                                        _ = advert_timer_tx
-                                            .send(TimerEvent::ResetInterval(self.skew_time))
-                                            .await;
-
-                                        // start_master_down_timer(
-                                        //     self.skew_time,
-                                        //     self.router_tx.clone(),
-                                        // );
-                                    } else {
-                                        if !self.preempt_mode || priority >= self.priority {
-                                            MASTER_HEALTHY.store(Arc::new(true));
-
-                                            // TODO: timer test
-                                            debug!("sending ResetTimer event...");
-                                            _ = advert_timer_tx.send(TimerEvent::ResetTimer);
-                                            // match advert_timer_tx.send(TimerEvent::ResetTimer).await
-                                            // {
-                                            //     Ok(()) => {
-                                            //         debug!("Ok")
-                                            //     }
-                                            //     Err(err) => {
-                                            //         debug!("{}", err.to_string());
-                                            //     }
-                                            // }
-
-                                            // start_master_down_timer(
-                                            //     self.master_down_int,
-                                            //     self.router_tx.clone(),
-                                            // );
-                                        }
-                                    }
-                                }
-                            }
-                            State::Master => {
-                                if router_id == self.router_id {
-                                    if priority == 0 {
-                                        send_advertisement(
-                                            self.sock_fd.as_raw_fd(),
-                                            advert_pkt.clone(),
-                                        );
-                                        // Set advert timer to advert_int
-                                    } else if priority > self.priority {
-                                        // Stop advert timer
-                                        // Set master down timer
-                                        MASTER_HEALTHY.store(Arc::new(true));
-
-                                        // TODO: timer test
-                                        // _ = advert_timer_tx.blocking_send(TimerEvent::ResetTimer);
-                                        _ = advert_timer_tx.send(TimerEvent::ResetTimer).await;
-                                        // start_master_down_timer(
-                                        //     self.master_down_int,
-                                        //     self.router_tx.clone(),
-                                        // );
-
-                                        // Transition to Backup
-                                        info!("Advertisement of priority {} received from src {}, transitioning to BACKUP state...", priority, src_addr.to_string());
-                                        self.state = State::Backup;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        },
                         Event::Startup => {
                             // TODO: Startup
                             match self.state {
                                 State::Initialize => {
                                     // Do things..
-                                    if self.priority == 255 {
+                                    if self.priority == 0xFF {
                                         // Multicast Advertisement
                                         send_advertisement(
                                             self.sock_fd.as_raw_fd(),
@@ -271,34 +168,37 @@ impl Router {
                                             self.virtual_ip,
                                         );
 
-                                        // Start advertisement timer
-                                        start_advert_timer(
-                                            self.advert_int,
-                                            self.sock_fd.as_raw_fd(),
-                                            advert_pkt.clone(),
-                                            self.router_tx.clone(),
-                                        );
-
-                                        // TODO: Set Virtual IP to an interface
+                                        // Add Virtual IP to the interface
                                         match add_ip_address(&self.if_name, self.virtual_ip) {
                                             Ok(_) => {}
                                             Err(err) => {
-                                                error!("Failed to add IP address {} to interface {}: {}", self.virtual_ip.to_string(), &self.if_name, err);
+                                                error!("Failed to add IP address {}/{} to interface {}: {}", self.virtual_ip.0.to_string(), self.virtual_ip.1, &self.if_name, err);
+                                                error!("exiting...");
+                                                return;
                                             }
                                         }
+
+                                        // Start advertisement timer
+                                        advert_timer_tx = Some(start_advert_timer(
+                                            self.advert_int,
+                                            self.sock_fd.as_raw_fd(),
+                                            advert_pkt.clone(),
+                                        ));
+
+                                        // Stop master down timer
+                                        match master_timer_tx {
+                                            Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
+                                            None => { /*  */ }
+                                        };
 
                                         // Promote oneself to Master
                                         self.state = State::Master;
                                     } else {
-                                        // Set Master Down Timer interval to MasterDownInterval
-                                        // TODO: timer test
-                                        // _ = advert_timer_tx.blocking_send(TimerEvent::ResetTimer);
-                                        _ = advert_timer_tx.send(TimerEvent::ResetTimer).await;
-
-                                        // start_master_down_timer(
-                                        //     self.master_down_int,
-                                        //     self.router_tx.clone(),
-                                        // );
+                                        // Start master down timer
+                                        master_timer_tx = Some(start_master_down_timer(
+                                            self.master_down_int,
+                                            self.router_tx.clone(),
+                                        ));
 
                                         self.state = State::Backup;
                                     }
@@ -306,18 +206,91 @@ impl Router {
                                 _ => (),
                             }
                         }
-                        Event::AdvertTimeout => match self.state {
-                            State::Master => {
-                                start_advert_timer(
-                                    self.advert_int,
-                                    self.sock_fd.as_raw_fd(),
-                                    advert_pkt.clone(),
-                                    self.router_tx.clone(),
+                        Event::AdvertReceived(router_id, priority, src_addr) => match self.state {
+                            State::Backup => {
+                                debug!(
+                                    "\tAdvert router id {} - priority {} - src {}",
+                                    router_id,
+                                    priority,
+                                    src_addr.to_string()
                                 );
+
+                                if router_id == self.router_id {
+                                    if priority == 0 {
+                                        // Reset master down timer to skew_time
+                                        warn!("VRRPv2 advert of priority 0 received.");
+                                        match master_timer_tx {
+                                            Some(ref tx) => {
+                                                _ = tx
+                                                    .send(TimerEvent::ResetInterval(self.skew_time))
+                                                    .await
+                                            }
+                                            None => {
+                                                error!("cannot find master down timer binding, exiting..");
+                                                return;
+                                            }
+                                        };
+                                    } else {
+                                        if !self.preempt_mode || priority >= self.priority {
+                                            // Master healthy. Resetting master down timer
+                                            match master_timer_tx {
+                                                Some(ref tx) => {
+                                                    _ = tx.send(TimerEvent::ResetTimer).await
+                                                }
+                                                None => {
+                                                    error!("cannot find master down timer binding, exiting..");
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            _ => {
-                                // Discard
+                            State::Master => {
+                                if router_id == self.router_id {
+                                    if priority == 0 {
+                                        send_advertisement(
+                                            self.sock_fd.as_raw_fd(),
+                                            advert_pkt.clone(),
+                                        );
+                                        // Set advert timer to advert_int
+                                    } else if !self.preempt_mode || priority > self.priority {
+                                        // Delete virtual ip bound to interface
+                                        match del_ip_address(&self.if_name, self.virtual_ip) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                error!("Failed to delete IP address {}/{} from interface {}: {}", self.virtual_ip.0.to_string(), self.virtual_ip.1, &self.if_name, err);
+                                                error!("exiting...");
+                                                return;
+                                            }
+                                        }
+                                        // Stop advert timer
+                                        match advert_timer_tx {
+                                            Some(ref tx) => {
+                                                _ = tx.send(TimerEvent::Abort).await;
+                                            }
+                                            None => {
+                                                error!("Failed to find bindings for advert timer!");
+                                            }
+                                        };
+
+                                        advert_timer_tx = None;
+
+                                        // Transition to Backup
+                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}", src_addr.to_string(), priority
+                                        , self.priority
+                                    );
+                                        // Start master down timer
+                                        master_timer_tx = Some(start_master_down_timer(
+                                            self.master_down_int,
+                                            self.router_tx.clone(),
+                                        ));
+                                        info!("Demoting to BACKUP state..");
+                                        self.state = State::Backup;
+                                    }
+                                }
                             }
+                            _ => {}
                         },
                         Event::MasterDown => match self.state {
                             State::Backup => {
@@ -333,27 +306,34 @@ impl Router {
                                 );
 
                                 // Start advertisement timer
-                                start_advert_timer(
+                                advert_timer_tx = Some(start_advert_timer(
                                     self.advert_int,
                                     self.sock_fd.as_raw_fd(),
                                     advert_pkt.clone(),
-                                    self.router_tx.clone(),
-                                );
+                                ));
 
                                 // TODO: Set Virtual IP to an interface
                                 match add_ip_address(&self.if_name, self.virtual_ip) {
                                     Ok(_) => {}
                                     Err(err) => {
                                         error!(
-                                            "Failed to add IP address {} to interface {}: {}",
-                                            self.virtual_ip.to_string(),
+                                            "Failed to add IP address {}/{} to interface {}: {}",
+                                            self.virtual_ip.0.to_string(),
+                                            self.virtual_ip.1,
                                             &self.if_name,
                                             err
                                         );
                                     }
                                 }
 
-                                warn!("Master down interval expired. Transitioning to MASTER state...");
+                                warn!("Master down interval expired.");
+                                // Stop master down timer
+                                match master_timer_tx {
+                                    Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
+                                    None => { /*  */ }
+                                };
+
+                                info!("Promoting to MASTER state..");
                                 self.state = State::Master;
                             }
                             _ => {
@@ -362,10 +342,16 @@ impl Router {
                         },
                         Event::_ShutDown => match self.state {
                             State::Backup => {
-                                // Stop MasterDown timer
+                                // Stop master down timer
+                                match master_timer_tx {
+                                    Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
+                                    None => { /*  */ }
+                                };
+
+                                // Demote to initialize state
+                                info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
                             }
-                            State::Master => {}
                             _ => {}
                         },
                     };
@@ -387,7 +373,7 @@ impl Router {
         pkt_hdr.advert_int = self.advert_int;
 
         let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-        vip_addresses.push(self.virtual_ip);
+        vip_addresses.push(self.virtual_ip.0);
 
         pkt_hdr.set_vip_addresses(&vip_addresses);
 
@@ -415,8 +401,13 @@ pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
     }
 }
 
-pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual_ip: Ipv4Addr) {
-    let mut pkt = GarpPacket::new(virtual_ip, router_id);
+pub fn send_gratuitous_arp(
+    sock_fd: i32,
+    if_name: String,
+    router_id: u8,
+    virtual_ip: (Ipv4Addr, u8),
+) {
+    let mut pkt = GarpPacket::new(virtual_ip.0, router_id);
 
     unsafe {
         debug!("interface {} len {}", if_name, if_name.len());
@@ -470,95 +461,85 @@ pub fn send_gratuitous_arp(sock_fd: i32, if_name: String, router_id: u8, virtual
     }
 }
 
-pub fn start_advert_timer(advert_int: u8, sock_fd: i32, pkt_vec: Vec<u8>, tx: Sender<Event>) {
-    thread::spawn(move || {
-        send_advertisement(sock_fd, pkt_vec);
-        thread::sleep(Duration::from_secs(advert_int as u64));
-        // TODO: async test
-        _ = tx.blocking_send(Event::AdvertTimeout);
-    });
+fn start_advert_timer(advert_int: u8, sock_fd: i32, pkt_vec: Vec<u8>) -> Sender<TimerEvent> {
+    let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
+    tokio::task::spawn(async move { advert_timer(advert_int, sock_fd, pkt_vec, rx).await });
+
+    tx
+}
+
+async fn advert_timer(interval: u8, sock_fd: i32, pkt_vec: Vec<u8>, mut rx: Receiver<TimerEvent>) {
+    let mut timer_int = interval.clone();
+    loop {
+        debug!("starting advertisement timer!");
+
+        let sleep = tokio::time::sleep(Duration::from_secs(timer_int as u64));
+        tokio::pin!(sleep);
+
+        tokio::select! {
+            res = rx.recv() => {
+                match res {
+                    Some(event) => {
+                        match event {
+                            TimerEvent::ResetTimer => {
+                                debug!("resetting master down timer..");
+                            }
+                            TimerEvent::ResetInterval(int) => {
+                                debug!("resetting master down timer interval..");
+                                timer_int = int as u8;
+                            }
+                            TimerEvent::Abort => {
+                                debug!("aborting master down timer..");
+                                break;
+                            }
+                        }
+                    },
+                    None => {},
+                }
+            },
+            () = &mut sleep => {
+                send_advertisement(sock_fd, pkt_vec.clone());
+            }
+        }
+    }
+}
+
+fn start_master_down_timer(interval: f32, router_tx: Sender<Event>) -> Sender<TimerEvent> {
+    let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
+    tokio::task::spawn(async move { master_down_timer(interval, router_tx, rx).await });
+
+    tx
 }
 
 async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<TimerEvent>) {
     let mut timer_int = interval.clone();
     loop {
-        let event = tokio::select! {
-            () = master_down_timer_task(interval, tx.clone()) => {
+        debug!("starting master down timer!");
+
+        let sleep = tokio::time::sleep(Duration::from_millis((timer_int * 1000 as f32) as u64));
+        tokio::pin!(sleep);
+
+        tokio::select! {
+            Some(event) = rx.recv() => {
+                match event {
+                    TimerEvent::ResetTimer => {
+                        debug!("resetting master down timer..");
+                    }
+                    TimerEvent::ResetInterval(int) => {
+                        debug!("resetting master down timer interval..");
+                        timer_int = int;
+                    }
+                    TimerEvent::Abort => {
+                        debug!("aborting master down timer..");
+                        break;
+                    }
+                }
+            },
+            () = &mut sleep => {
+                warn!("Master Unhealthy");
+                _ = tx.send(Event::MasterDown).await;
                 break;
             },
-            Some(event) = rx.recv() => {
-                debug!("received event!");
-                event
-            },
         };
-
-        debug!("timer received event: {}", event);
-        debug!("select! poll finished");
-
-        // match rx.recv().await {
-        //     Some(event) => match event {
-        //         TimerEvent::ResetTimer => {
-        //             debug!("Received master down timer reset event");
-        //         }
-        //         TimerEvent::ResetInterval(int) => {
-        //             debug!("Resetting master down timer interval to {} s...", int);
-        //             timer_int = int;
-        //         }
-        //     },
-        //     None => {
-        //         debug!("no valid event!");
-        //     }
-        // }
-
-        // select! {
-        //     () = master_down_timer_task(timer_int, tx.clone()).fuse() => {}
-        //     result = rx.recv().fuse() => {
-        //         match result {
-        //             Some(event) => {
-        //                 match event {
-        //                     TimerEvent::ResetTimer => {
-        //                         debug!("Received master down timer reset event");
-        //                     },
-        //                     TimerEvent::ResetInterval(int) => {
-        //                         debug!("Resetting master down timer interval to {} s...", int);
-        //                         timer_int = int;
-        //                     },
-        //                 }
-        //             },
-        //             None => {},
-        //         }
-        //     }
-        //     complete => {},
-        // }
-
-        // tokio::select! {
-        //     _ = master_down_timer_task(timer_int, tx.clone()) => {}
-        //     _ = rx.recv() => {
-        //         debug!("Received master down timer reset event");
-        //     }
-        // };
-
-        // match res {
-        //     Some(event) => match event {
-        //         TimerEvent::ResetTimer => {
-        //             debug!("Resetting master down timer...");
-        //         }
-        //         TimerEvent::ResetInterval(int) => {
-        //
-        //             timer_int = int;
-        //         }
-        //     },
-        //     None => {
-        //         // TODO: redundant?
-        //         break;
-        //     }
-        // }
     }
-}
-
-async fn master_down_timer_task(interval: f32, tx: Sender<Event>) {
-    thread::sleep(Duration::from_millis((interval * 1000 as f32) as u64));
-    warn!("Master Unhealthy");
-    // _ = tx.blocking_send(Event::MasterDown);
-    _ = tx.send(Event::MasterDown).await;
 }

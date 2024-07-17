@@ -20,8 +20,16 @@ if [[ -z "${VRRP_ADVERT_INT}" ]]; then
   export VRRP_ADVERT_INT=3
 fi
 
-if [ ! -f ./vrrp.toml ]; then
-  printf "interface = \"$VRRP_IF\"\nrouter_id = $VRRP_RID\npriority = $VRRP_PRIORITY\nadvert_int = $VRRP_ADVERT_INT\nvirtual_ip = \"$VRRP_VIP\"" >> ./vrrp.toml
+if [[ -z "${VRRP_NETMASK_LEN}" ]]; then
+  export VRRP_NETMASK_LEN=16
 fi
 
-vrrp-test -i eth0 -r -c vrrp.toml
+if [ ! -f ./vrrp.toml ]; then
+  printf "interface = \"$VRRP_IF\"\nrouter_id = $VRRP_RID\npriority = $VRRP_PRIORITY\nadvert_int = $VRRP_ADVERT_INT\nvirtual_ip = \"$VRRP_VIP\"\nnetmask_len = $VRRP_NETMASK_LEN" >> ./vrrp.toml
+fi
+
+if [[ -z "${VERBOSE}" ]]; then
+  vrrp-test -i eth0 -r -c vrrp.toml
+else
+  vrrp-test -i eth0 -r -v -c vrrp.toml
+fi

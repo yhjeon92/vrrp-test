@@ -1,5 +1,7 @@
 use clap::Parser;
-use vrrp_test::{start_virutal_router, start_vrrp_listener};
+use log::error;
+use tokio::runtime::Builder;
+use vrrp_test::{start_vrouter_cfile_async, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -25,7 +27,21 @@ fn main() {
 
     match args.router {
         true => {
-            start_virutal_router(&args.config_file_path);
+            // start_virutal_router(&args.config_file_path);
+            // let runtime = match Builder::new_current_thread()
+            let runtime = match Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(5)
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    error!("runtime creation failed: {}", err.to_string());
+                    return;
+                }
+            };
+
+            runtime.block_on(start_vrouter_cfile_async(&args.config_file_path));
         }
         false => {
             start_vrrp_listener(args.interface);

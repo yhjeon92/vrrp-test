@@ -11,7 +11,9 @@ services:
       VRRP_RID: 50
       VRRP_PRIORITY: 100
       VRRP_VIP: 172.18.0.100
+      VRRP_NETMASK_LEN: 16
       VRRP_ADVERT_INT: 5
+      VERBOSE: true
     cap_add:
       - CAP_NET_ADMIN
       - CAP_NET_RAW
@@ -28,7 +30,9 @@ services:
       VRRP_RID: 50
       VRRP_PRIORITY: 98
       VRRP_VIP: 172.18.0.100
+      VRRP_NETMASK_LEN: 16
       VRRP_ADVERT_INT: 5
+      VERBOSE: true
     cap_add:
       - CAP_NET_ADMIN
       - CAP_NET_RAW
