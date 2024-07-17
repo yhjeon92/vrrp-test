@@ -1,21 +1,22 @@
 use std::{
+    convert::TryInto,
     ffi::OsString,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
 
 use crate::{
-    constants::{
-        AF_INET, IPPROTO_VRRPV2,
-        SOCKET_TTL, SOCK_RAW, VRRP_MCAST_ADDR,
-    },
+    constants::{AF_INET, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR},
     interface::set_if_multicast_flag,
+    packet::VrrpV2Packet,
 };
+use bincode::Options;
+use log::debug;
 use nix::{
     libc::socket,
     sys::socket::{
-        self, bind, getsockname, setsockopt, sockopt, IpMembershipRequest, LinkAddr, SockFlag,
-        SockProtocol, SockaddrIn,
+        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, SockFlag, SockProtocol,
+        SockaddrIn,
     },
 };
 
@@ -201,4 +202,49 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     };
 
     Ok(sock_fd)
+}
+
+pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
+    let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
+        Ok((pkt_len, _)) => pkt_len,
+        Err(err) => {
+            return Err(format!("recvfrom() error: {}", err.to_string()));
+        }
+    };
+
+    // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+    let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_big_endian()
+        .deserialize(&pkt_buf[0..VRRP_HDR_LEN])
+        .unwrap();
+
+    debug!("VRRPv2 socket received a packet:");
+    debug!(
+        "{}",
+        pkt_buf[0..len]
+            .iter()
+            .map(|byte| format!("{:02X?} ", byte))
+            .collect::<String>()
+    );
+
+    let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+
+    for ind in 0..vrrp_pkt.cnt_ip_addr {
+        vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+            pkt_buf[VRRP_HDR_LEN + (ind * 4) as usize..VRRP_HDR_LEN + 4 + (ind * 4) as usize]
+                .try_into()
+                .unwrap(),
+        )));
+    }
+
+    vrrp_pkt.set_vip_addresses(&vip_addresses);
+
+    let auth_data =
+        pkt_buf[VRRP_HDR_LEN + (vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
+
+    vrrp_pkt.set_auth_data(&auth_data);
+
+    return Ok(vrrp_pkt);
 }

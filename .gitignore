@@ -1,6 +1,6 @@
 debug/**
 target/**
 Cargo.lock
-vrrp.toml
+vrrp*.toml
 vrrp-docker.toml
 *.log
