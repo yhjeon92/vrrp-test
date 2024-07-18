@@ -11,7 +11,7 @@ use nix::sys::socket::{MsgFlags, SockaddrIn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::{
-    interface::{add_ip_address, del_ip_address},
+    interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
     socket::send_gratuitous_arp,
     VRouterConfig,
@@ -81,6 +81,7 @@ impl fmt::Display for TimerEvent {
 pub struct Router {
     state: State,
     if_name: String,
+    local_addr: Ipv4Addr,
     sock_fd: OwnedFd,
     arp_sock_fd: OwnedFd,
     router_id: u8,
@@ -103,9 +104,18 @@ impl Router {
         rx: Receiver<Event>,
         config: VRouterConfig,
     ) -> Result<Router, String> {
+        let local_addr = match get_ip_address(&if_name) {
+            Ok(addr) => addr,
+            Err(err) => {
+                error!("Failed to initialize router: {}", err);
+                return Err(err);
+            }
+        };
+
         Ok(Router {
             state: State::Initialize,
             if_name,
+            local_addr,
             sock_fd: advert_sock_fd,
             arp_sock_fd,
             router_id: config.router_id,
@@ -125,13 +135,7 @@ impl Router {
     pub async fn start(&mut self) {
         info!("Router thread running...");
 
-        let advert_pkt = match self.build_packet() {
-            Some(pkt) => pkt.clone(),
-            _ => {
-                error!("Failed to build VRRP advertisement packet");
-                return;
-            }
-        };
+        let advert_pkt = self.build_packet();
 
         info!("MASTER DOWN INTERVAL set to {}", self.master_down_int);
 
@@ -261,8 +265,10 @@ impl Router {
                                             }
                                             None => { /* */ }
                                         }
-                                        // TODO: or priority is equal to local priority AND sender ip addr is greater than local ip addr
-                                    } else if !self.preempt_mode || priority > self.priority {
+                                        // Received an Advert with higher priority - demoting to BACKUP
+                                    } else if (!self.preempt_mode || priority > self.priority)
+                                        || (priority == self.priority && src_addr > self.local_addr)
+                                    {
                                         // Delete virtual ip bound to interface
                                         match del_ip_address(&self.if_name, self.virtual_ip) {
                                             Ok(_) => {}
@@ -285,9 +291,11 @@ impl Router {
                                         advert_timer_tx = None;
 
                                         // Transition to Backup
-                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}", src_addr.to_string(), priority
-                                        , self.priority
-                                    );
+                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}", 
+                                            src_addr.to_string(), 
+                                            priority, 
+                                            self.priority);
+
                                         // Start master down timer
                                         master_timer_tx = Some(start_master_down_timer(
                                             self.master_down_int,
@@ -367,6 +375,9 @@ impl Router {
                                     None => { /* */ }
                                 };
                                 // TODO: Send an advert with priority = 0
+                                let pkt = self.build_packet_with_priority(0);
+                                send_advertisement(self.sock_fd.as_raw_fd(), pkt);
+
                                 // Demote to initialize state
                                 info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
@@ -383,7 +394,7 @@ impl Router {
         }
     }
 
-    fn build_packet(&self) -> Option<Vec<u8>> {
+    fn build_packet(&self) -> Vec<u8> {
         let mut pkt_hdr = VrrpV2Packet::new();
         pkt_hdr.router_id = self.router_id;
         pkt_hdr.priority = self.priority;
@@ -396,11 +407,33 @@ impl Router {
 
         pkt_hdr.set_vip_addresses(&vip_addresses);
 
+        // TODO
         let auth_data = [49, 49, 49, 49, 0, 0, 0, 0].to_vec();
 
         pkt_hdr.set_auth_data(&auth_data);
 
-        Some(pkt_hdr.to_bytes())
+        pkt_hdr.to_bytes()
+    }
+
+    fn build_packet_with_priority(&self, priority: u8) -> Vec<u8> {
+        let mut pkt_hdr = VrrpV2Packet::new();
+        pkt_hdr.router_id = self.router_id;
+        pkt_hdr.priority = priority;
+        pkt_hdr.cnt_ip_addr = 1;
+        pkt_hdr.auth_type = 1;
+        pkt_hdr.advert_int = self.advert_int;
+
+        let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
+        vip_addresses.push(self.virtual_ip.0);
+
+        pkt_hdr.set_vip_addresses(&vip_addresses);
+
+        // TODO
+        let auth_data = [49, 49, 49, 49, 0, 0, 0, 0].to_vec();
+
+        pkt_hdr.set_auth_data(&auth_data);
+
+        pkt_hdr.to_bytes()
     }
 }
 
