@@ -7,19 +7,19 @@ use std::{
 
 use crate::{
     constants::{
-        AF_INET, IPPROTO_IP, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_DGRAM, SOCK_RAW, VRRP_HDR_LEN,
-        VRRP_MCAST_ADDR,
+        AF_INET, AF_PACKET, ETH_PROTO_ARP, IPPROTO_IP, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_DGRAM,
+        SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR,
     },
-    interface::set_if_multicast_flag,
-    packet::VrrpV2Packet,
+    interface::{get_if_index, set_if_multicast_flag},
+    packet::{GarpPacket, VrrpV2Packet},
 };
 use bincode::Options;
-use log::debug;
+use log::{debug, error, info, warn};
 use nix::{
-    libc::socket,
+    libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
-        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, SockFlag, SockProtocol,
-        SockaddrIn,
+        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags,
+        SockFlag, SockProtocol, SockaddrIn, SockaddrLike,
     },
 };
 
@@ -222,6 +222,64 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     };
 
     Ok(sock_fd)
+}
+
+pub fn send_gratuitous_arp(
+    sock_fd: i32,
+    if_name: String,
+    router_id: u8,
+    virtual_ip: (Ipv4Addr, u8),
+) {
+    let mut pkt = GarpPacket::new(virtual_ip.0, router_id);
+
+    let if_index = match get_if_index(&if_name) {
+        Ok(ind) => ind,
+        Err(err) => {
+            error!("{}", err);
+            return;
+        }
+    };
+
+    debug!("interface {} index {}", if_name, if_index);
+
+    unsafe {
+        let mut sock_addr = nix::libc::sockaddr_ll {
+            sll_family: AF_PACKET as u16,
+            sll_protocol: ETH_PROTO_ARP as u16,
+            sll_ifindex: if_index as i32,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8],
+        };
+
+        let ptr_sockaddr = core::mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sock_addr);
+
+        let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
+            Some(addr) => addr,
+            None => {
+                error!("Failed to construct sockaddr");
+                return;
+            }
+        };
+
+        match nix::sys::socket::sendto(
+            sock_fd.as_raw_fd(),
+            &pkt.to_bytes().as_slice(),
+            &sock_addr,
+            MsgFlags::empty(),
+        ) {
+            Ok(size) => {
+                info!("Sent a GARP of len {}", size);
+            }
+            Err(err) => {
+                warn!(
+                    "An error was encountered while sending GARP request! {}",
+                    err.to_string()
+                );
+            }
+        }
+    }
 }
 
 pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
