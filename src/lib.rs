@@ -1,5 +1,6 @@
 use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, thread};
 
+use interface::get_ip_address;
 use log::{error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
@@ -334,6 +335,15 @@ pub fn start_vrrp_listener(if_name: String) {
             Err(err) => {
                 warn!("Invalid VRRP packet received: {}", err);
             }
+        }
+    }
+}
+
+pub fn debugger(if_name: &str) {
+    match get_ip_address(if_name) {
+        Ok(_addr) => {}
+        Err(err) => {
+            error!("{}", err);
         }
     }
 }

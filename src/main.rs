@@ -1,7 +1,7 @@
 use clap::Parser;
 use log::error;
 use tokio::runtime::Builder;
-use vrrp_test::{start_vrouter_cfile_async, start_vrrp_listener};
+use vrrp_test::{debugger, start_vrouter_cfile_async, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -17,6 +17,8 @@ struct Args {
     config_file_path: String,
     #[arg(short('v'), default_value_t = false)]
     verbose: bool,
+    #[arg(short('d'))]
+    debug: bool,
 }
 
 fn main() {
@@ -24,6 +26,11 @@ fn main() {
 
     std::env::set_var("RUST_LOG", if args.verbose { "debug" } else { "info" });
     env_logger::init();
+
+    if args.debug {
+        debugger(&args.interface);
+        return;
+    }
 
     match args.router {
         true => {

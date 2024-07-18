@@ -6,22 +6,30 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
-use log::{debug, error};
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr};
+use log::{debug, error, info};
+use nix::{
+    libc::sockaddr_in,
+    sys::socket::{recvmsg, sendmsg, sendto, ControlMessage, MsgFlags, NetlinkAddr},
+};
 
 use crate::{
     constants::{
-        AF_INET, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING,
-        IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
-        RT_SCOPE_UNIVERSE,
+        AF_INET, AF_UNSPEC, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST,
+        IFR_FLAG_RUNNING, IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
+        NLM_F_REQUEST, RTM_DELADDR, RTM_GETADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
     },
     packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
-    socket::open_netlink_socket,
+    socket::{open_ip_socket, open_netlink_socket},
 };
 
 struct IfrFlags {
     _ifr_name: [u8; 16],
     ifr_flags: i16,
+}
+
+struct IfRequest {
+    _ifr_name: [u8; 16],
+    ifr_addr: [u8; 16], /* for AF_INET: sockaddr_in [ i16 sin_family - u16 sin_port ] */
 }
 
 pub fn get_if_index(if_name: &str) -> Result<u32, String> {
@@ -32,25 +40,12 @@ pub fn get_if_index(if_name: &str) -> Result<u32, String> {
 }
 
 pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), String> {
-    let interfaces = nix::net::if_::if_nameindex().unwrap();
-
-    let mut if_found = false;
-
-    for interface in interfaces.iter() {
-        match interface.name().to_str() {
-            Ok(name) => {
-                if name == if_name {
-                    if_found = true;
-                    break;
-                }
-            }
-            Err(_) => {}
+    _ = match get_if_index(if_name) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(err);
         }
-    }
-
-    if !if_found {
-        return Err(format!("No interface named {}", if_name));
-    }
+    };
 
     let ifname_slice = &mut [0u8; 16];
 
@@ -84,6 +79,72 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), Str
     }
 }
 
+pub fn get_ip_address(if_name: &str) -> Result<Ipv4Addr, String> {
+    /* check the interface of given name exists */
+    _ = match get_if_index(if_name) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    let ifname_slice = &mut [0u8; 16];
+
+    for (i, b) in if_name.as_bytes().iter().enumerate() {
+        ifname_slice[i] = *b;
+    }
+
+    let mut if_opts = IfRequest {
+        _ifr_name: {
+            let mut buf = [0u8; 16];
+            buf.clone_from_slice(ifname_slice);
+            buf
+        },
+        ifr_addr: [0u8; 16],
+    };
+
+    let sock_fd = match open_ip_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    unsafe {
+        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCGIFADDR, &mut if_opts);
+        if res < 0 {
+            return Err(format!(
+                "Failed to get primary IPv4 address of interface {}: {}",
+                if_name,
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+
+        debug!(
+            "{}",
+            if_opts
+                .ifr_addr
+                .iter()
+                .map(|byte| format!("{:02X?} ", byte))
+                .collect::<String>()
+        );
+
+        let sockaddr =
+            core::mem::transmute::<*mut [u8; 16], *mut sockaddr_in>(&mut if_opts.ifr_addr);
+
+        if sockaddr.read().sin_family == AF_INET as u16 {
+            let ipaddr_converted = Ipv4Addr::from(sockaddr.read().sin_addr.s_addr.to_ne_bytes());
+            debug!("{}", ipaddr_converted.to_string());
+            return Ok(Ipv4Addr::from(sockaddr.read().sin_addr.s_addr));
+        } else {
+            return Err(format!(
+                "Wrong sin_family 0x{:04X?} from kernel system call response",
+                sockaddr.read().sin_family
+            ));
+        }
+    }
+}
+
 pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
@@ -95,7 +156,7 @@ pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
     let if_ind = match get_if_index(if_name) {
         Ok(ind) => ind,
         Err(err) => {
-            return Err(err.to_string());
+            return Err(err);
         }
     };
 
@@ -209,7 +270,7 @@ pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
     let if_ind = match get_if_index(if_name) {
         Ok(ind) => ind,
         Err(err) => {
-            return Err(err.to_string());
+            return Err(err);
         }
     };
 

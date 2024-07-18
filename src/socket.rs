@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    constants::{AF_INET, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR},
+    constants::{
+        AF_INET, IPPROTO_IP, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_DGRAM, SOCK_RAW, VRRP_HDR_LEN,
+        VRRP_MCAST_ADDR,
+    },
     interface::set_if_multicast_flag,
     packet::VrrpV2Packet,
 };
@@ -19,6 +22,23 @@ use nix::{
         SockaddrIn,
     },
 };
+
+pub fn open_ip_socket() -> Result<OwnedFd, String> {
+    let sock_fd: OwnedFd;
+
+    unsafe {
+        sock_fd = match socket(AF_INET, SOCK_DGRAM, IPPROTO_IP) {
+            -1 => {
+                return Err(format!(
+                    "Failed to open a socket - check the process privileges"
+                ));
+            }
+            fd => OwnedFd::from_raw_fd(fd),
+        };
+    }
+
+    Ok(sock_fd)
+}
 
 pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
