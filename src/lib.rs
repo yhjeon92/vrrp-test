@@ -1,12 +1,12 @@
-use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr};
+use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, thread, time::Duration};
 
 use interface::get_ip_address;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
 use serde::{Deserialize, Serialize};
 use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Receiver};
 
 mod constants;
 mod interface;
@@ -91,7 +91,7 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
     }
 }
 
-pub async fn start_vrouter_async(config: VRouterConfig) {
+pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
     let if_name = config.interface.clone();
     let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
@@ -140,7 +140,31 @@ pub async fn start_vrouter_async(config: VRouterConfig) {
         }
     };
 
-    tokio::spawn(async move { router.start().await });
+    tokio::task::spawn(async move { router.start().await });
+    // tokio::spawn(async move { router.start().await });
+
+    // tokio::spawn(async move {
+    //     match shutdown_rx.blocking_recv().recv().await {
+    //         Ok(_) => {
+    //             _ = router_tx_cloned.clone().send(Event::_ShutDown).await;
+    //             return;
+    //         }
+    //         Err(_) => {
+    //             return;
+    //         }
+    //     }
+    // });
+
+    let tx_handle = tx.clone();
+
+    tokio::task::spawn(async move {
+        match shutdown_rx.recv().await {
+            Some(()) => {
+                _ = tx_handle.clone().send(Event::_ShutDown).await;
+            }
+            None => {}
+        }
+    });
 
     _ = tx.send(Event::Startup).await;
 
@@ -184,15 +208,15 @@ pub async fn start_vrouter_async(config: VRouterConfig) {
     }
 }
 
-pub async fn start_vrouter_cfile_async(config_file_path: &str) {
-    let config = match read_config(config_file_path) {
+pub async fn start_vrouter_cfile_async(config_file_path: String, shutdown_rx: Receiver<()>) {
+    let config = match read_config(&config_file_path) {
         Some(config) => config,
         None => {
             return;
         }
     };
 
-    start_vrouter_async(config).await;
+    start_vrouter_async(config, shutdown_rx).await;
 }
 
 pub fn start_vrrp_listener(if_name: String) {

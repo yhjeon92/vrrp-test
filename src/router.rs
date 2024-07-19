@@ -193,6 +193,7 @@ impl Router {
                                         };
 
                                         // Promote oneself to Master
+                                        info!("Promoting to MASTER state..");
                                         self.state = State::Master;
                                     } else {
                                         // Start master down timer
@@ -201,6 +202,8 @@ impl Router {
                                             self.router_tx.clone(),
                                         ));
 
+                                        // Promote oneself to BACKUP
+                                        info!("Promoting to BACKUP state..");
                                         self.state = State::Backup;
                                     }
                                 }
@@ -291,9 +294,9 @@ impl Router {
                                         advert_timer_tx = None;
 
                                         // Transition to Backup
-                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}", 
-                                            src_addr.to_string(), 
-                                            priority, 
+                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}",
+                                            src_addr.to_string(),
+                                            priority,
                                             self.priority);
 
                                         // Start master down timer
@@ -367,6 +370,7 @@ impl Router {
                                 // Demote to initialize state
                                 info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
+                                std::process::exit(1);
                             }
                             State::Master => {
                                 // Stop advert timer

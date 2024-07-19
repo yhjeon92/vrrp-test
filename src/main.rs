@@ -1,6 +1,7 @@
 use clap::Parser;
-use log::error;
+use log::{error, info};
 use tokio::runtime::Builder;
+use tokio::sync::mpsc::channel;
 use vrrp_test::{debugger, start_vrouter_cfile_async, start_vrrp_listener};
 
 #[derive(Parser)]
@@ -35,6 +36,9 @@ fn main() {
 
     match args.router {
         true => {
+            // let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+            let (new_tx, new_rx) = channel::<()>(1);
+
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(5)
@@ -47,7 +51,16 @@ fn main() {
                 }
             };
 
-            runtime.block_on(start_vrouter_cfile_async(&args.config_file_path));
+            ctrlc::set_handler(move || {
+                info!("received shutdown signal..");
+                _ = new_tx.clone().blocking_send(());
+            })
+            .expect("failed to setup signal handler");
+
+            runtime.block_on(start_vrouter_cfile_async(
+                format!("{}", &args.config_file_path),
+                new_rx,
+            ));
         }
         false => {
             start_vrrp_listener(args.interface);
