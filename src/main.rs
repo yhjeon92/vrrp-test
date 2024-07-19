@@ -36,8 +36,7 @@ fn main() {
 
     match args.router {
         true => {
-            // let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-            let (new_tx, new_rx) = channel::<()>(1);
+            let (shutdown_tx, shutdown_rx) = channel::<()>(1);
 
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
@@ -53,13 +52,13 @@ fn main() {
 
             ctrlc::set_handler(move || {
                 info!("received shutdown signal..");
-                _ = new_tx.clone().blocking_send(());
+                _ = shutdown_tx.clone().blocking_send(());
             })
             .expect("failed to setup signal handler");
 
             runtime.block_on(start_vrouter_cfile_async(
                 format!("{}", &args.config_file_path),
-                new_rx,
+                shutdown_rx,
             ));
         }
         false => {

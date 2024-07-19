@@ -6,17 +6,17 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
-use log::{debug, error, info};
+use log::{debug, error};
 use nix::{
     libc::sockaddr_in,
-    sys::socket::{recvmsg, sendmsg, sendto, ControlMessage, MsgFlags, NetlinkAddr},
+    sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr},
 };
 
 use crate::{
     constants::{
-        AF_INET, AF_UNSPEC, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST,
-        IFR_FLAG_RUNNING, IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
-        NLM_F_REQUEST, RTM_DELADDR, RTM_GETADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
+        AF_INET, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING,
+        IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
+        RT_SCOPE_UNIVERSE,
     },
     packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
     socket::{open_ip_socket, open_netlink_socket},

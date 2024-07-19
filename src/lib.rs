@@ -1,7 +1,7 @@
-use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, thread, time::Duration};
+use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr};
 
 use interface::get_ip_address;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
 use serde::{Deserialize, Serialize};
@@ -141,28 +141,17 @@ pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receive
     };
 
     tokio::task::spawn(async move { router.start().await });
-    // tokio::spawn(async move { router.start().await });
-
-    // tokio::spawn(async move {
-    //     match shutdown_rx.blocking_recv().recv().await {
-    //         Ok(_) => {
-    //             _ = router_tx_cloned.clone().send(Event::_ShutDown).await;
-    //             return;
-    //         }
-    //         Err(_) => {
-    //             return;
-    //         }
-    //     }
-    // });
 
     let tx_handle = tx.clone();
 
     tokio::task::spawn(async move {
-        match shutdown_rx.recv().await {
-            Some(()) => {
-                _ = tx_handle.clone().send(Event::_ShutDown).await;
+        loop {
+            match shutdown_rx.recv().await {
+                Some(()) => {
+                    _ = tx_handle.clone().send(Event::ShutDown).await;
+                }
+                None => {}
             }
-            None => {}
         }
     });
 

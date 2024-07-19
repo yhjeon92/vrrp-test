@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 // Socket
-pub const AF_UNSPEC: i32 = 0x00;
+pub const _AF_UNSPEC: i32 = 0x00;
 pub const AF_INET: i32 = 0x02;
 pub const _AF_NETLINK: u16 = 0x10;
 pub const AF_PACKET: i32 = 0x11;
@@ -30,7 +30,7 @@ pub const NLMSG_ALIGNTO: u32 = 4;
 // Message Types (rtnetlink)
 pub const RTM_NEWADDR: u16 = 0x14;
 pub const RTM_DELADDR: u16 = 0x15;
-pub const RTM_GETADDR: u16 = 0x16;
+pub const _RTM_GETADDR: u16 = 0x16;
 // Message Types (netlink)
 pub const _NLMSG_ERROR: u16 = 0x02;
 
@@ -41,10 +41,10 @@ pub const NLM_F_ACK: u16 = 0x04;
 pub const NLM_F_EXCL: u16 = 0x200;
 pub const NLM_F_CREATE: u16 = 0x400;
 
-pub const NLM_F_ROOT: u16 = 0x100;
-pub const NLM_F_MATCH: u16 = 0x200;
-pub const NLM_F_ATOMIC: u16 = 0x400;
-pub const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
+pub const _NLM_F_ROOT: u16 = 0x100;
+pub const _NLM_F_MATCH: u16 = 0x200;
+pub const _NLM_F_ATOMIC: u16 = 0x400;
+pub const _NLM_F_DUMP: u16 = _NLM_F_ROOT | _NLM_F_MATCH;
 
 // IFA SCOPE
 pub const RT_SCOPE_UNIVERSE: u8 = 0;

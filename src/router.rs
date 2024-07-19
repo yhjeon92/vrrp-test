@@ -35,7 +35,7 @@ impl fmt::Display for State {
 
 pub enum Event {
     Startup,
-    _ShutDown,
+    ShutDown,
     MasterDown,
     // RouterId - Priority - Source
     AdvertReceived(u8, u8, Ipv4Addr),
@@ -53,7 +53,7 @@ impl fmt::Display for Event {
                 prior,
                 src_addr.to_string()
             ),
-            _ => write!(f, "Unknown"),
+            Event::ShutDown => write!(f, "ShutDown"),
         }
     }
 }
@@ -359,7 +359,7 @@ impl Router {
                                 // TODO
                             }
                         },
-                        Event::_ShutDown => match self.state {
+                        Event::ShutDown => match self.state {
                             State::Backup => {
                                 // Stop master down timer
                                 match master_timer_tx {
@@ -370,7 +370,6 @@ impl Router {
                                 // Demote to initialize state
                                 info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
-                                std::process::exit(1);
                             }
                             State::Master => {
                                 // Stop advert timer
@@ -386,7 +385,10 @@ impl Router {
                                 info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
                             }
-                            _ => {}
+                            State::Initialize => {
+                                info!("Termination signal received. Exiting..");
+                                std::process::exit(0);
+                            }
                         },
                     };
                 }
