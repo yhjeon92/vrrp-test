@@ -4,8 +4,8 @@ use log::{debug, error};
 use serde::Deserialize;
 
 use crate::constants::{
-    ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, NLATTR_ALIGNTO, NLMSG_ALIGNTO,
-    SOCKET_TTL, VIRTUAL_ROUTER_MAC, VRRP_MCAST_ADDR,
+    BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, NLATTR_ALIGNTO,
+    NLMSG_ALIGNTO, SOCKET_TTL, VRRP_MCAST_ADDR,
 };
 
 // Size 8
@@ -191,26 +191,23 @@ pub struct GarpPacket {
 }
 
 impl GarpPacket {
-    pub fn new(virtual_ip: Ipv4Addr, router_id: u8) -> GarpPacket {
-        let mut packet = GarpPacket {
-            mac_dst: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-            mac_src: VIRTUAL_ROUTER_MAC,
-            eth_proto: ETH_PROTO_ARP as u16,
+    pub fn new(virtual_ip: Ipv4Addr, local_hw_addr: [u8; 6]) -> GarpPacket {
+        GarpPacket {
+            mac_dst: BROADCAST_MAC,
+            // mac_src: VIRTUAL_ROUTER_MAC,
+            mac_src: local_hw_addr,
+            eth_proto: ETH_PROTO_ARP,
             hw_type: HW_TYPE_ETH,
             proto_type: ETH_PROTO_IP as u16,
             hw_len: 6,
             proto_len: 4,
             op_code: 1,
-            hw_addr_src: VIRTUAL_ROUTER_MAC,
+            // hw_addr_src: VIRTUAL_ROUTER_MAC,
+            hw_addr_src: local_hw_addr,
             proto_addr_src: virtual_ip.octets(),
-            hw_addr_dst: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            hw_addr_dst: BROADCAST_MAC,
             proto_addr_dst: virtual_ip.octets(),
-        };
-
-        packet.mac_src[5] = router_id;
-        packet.hw_addr_src[5] = router_id;
-
-        packet
+        }
     }
 
     pub fn to_bytes(&mut self) -> Vec<u8> {

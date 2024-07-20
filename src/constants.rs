@@ -9,6 +9,9 @@ pub const AF_PACKET: i32 = 0x11;
 pub const SOCK_DGRAM: i32 = 0x02;
 pub const SOCK_RAW: i32 = 0x03;
 
+// Socket Flags
+pub const SOCK_CLOEXEC: i32 = 0x80000;
+
 pub const _IPPROTO_ICMP: i32 = 0x01;
 pub const _IPPROTO_ICMPV6: i32 = 0x3A;
 pub const _IPPROTO_TCP: i32 = 6;
@@ -17,8 +20,8 @@ pub const IPPROTO_IP: i32 = 0x00;
 pub const _IPPROTO_IPV6: i32 = 0x29;
 pub const IPPROTO_VRRPV2: i32 = 0x70;
 // ARP 2054
-pub const ETH_PROTO_ARP: i32 = 0x0806;
-pub const ETH_PROTO_IP: i32 = 0x0800;
+pub const ETH_PROTO_ARP: u16 = 0x0806;
+pub const ETH_PROTO_IP: u16 = 0x0800;
 
 pub const IFR_FLAG_UP: i16 = 0x01;
 pub const IFR_FLAG_RUNNING: i16 = 0x40;
@@ -62,6 +65,8 @@ pub const SOCKET_TTL: u8 = 0xFF;
 pub const VRRP_HDR_LEN: usize = 28;
 pub const VRRP_MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 18);
 
-pub const VIRTUAL_ROUTER_MAC: [u8; 6] = [0, 0, 94, 0, 1, 0];
+pub const BROADCAST_MAC: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+pub const BROADCAST_MAC_SOCKADDR_LL: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0];
+pub const _VIRTUAL_ROUTER_MAC: [u8; 6] = [0, 0, 94, 0, 1, 0];
 
 pub const HW_TYPE_ETH: u16 = 0x01;

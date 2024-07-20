@@ -8,7 +8,7 @@ use std::{
 
 use log::{debug, error};
 use nix::{
-    libc::sockaddr_in,
+    libc::{sockaddr, sockaddr_in},
     sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr},
 };
 
@@ -142,6 +142,77 @@ pub fn get_ip_address(if_name: &str) -> Result<Ipv4Addr, String> {
                 sockaddr.read().sin_family
             ));
         }
+    }
+}
+
+pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
+    /* check the interface of given name exists */
+    _ = match get_if_index(if_name) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    let ifname_slice = &mut [0u8; 16];
+
+    for (i, b) in if_name.as_bytes().iter().enumerate() {
+        ifname_slice[i] = *b;
+    }
+
+    let mut if_opts = IfRequest {
+        _ifr_name: {
+            let mut buf = [0u8; 16];
+            buf.clone_from_slice(ifname_slice);
+            buf
+        },
+        ifr_addr: [0u8; 16],
+    };
+
+    let sock_fd = match open_ip_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    unsafe {
+        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCGIFHWADDR, &mut if_opts);
+        if res < 0 {
+            return Err(format!(
+                "Failed to get primary IPv4 address of interface {}: {}",
+                if_name,
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+
+        debug!(
+            "{}",
+            if_opts
+                .ifr_addr
+                .iter()
+                .map(|byte| format!("{:02X?} ", byte))
+                .collect::<String>()
+        );
+
+        let sockaddr = core::mem::transmute::<*mut [u8; 16], *mut sockaddr>(&mut if_opts.ifr_addr);
+
+        let hwaddr: [i8; 6] = sockaddr.read().sa_data[0..6].try_into().unwrap();
+        let mut hwaddr_converted: [u8; 6] = [0u8; 6];
+
+        for index in 0..6 {
+            hwaddr_converted[index] = hwaddr[index] as u8;
+        }
+
+        debug!(
+            "MAC converted: {}",
+            hwaddr_converted
+                .iter()
+                .map(|byte| format!("{:02X?} ", byte))
+                .collect::<String>()
+        );
+
+        Ok(hwaddr_converted)
     }
 }
 

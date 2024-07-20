@@ -7,10 +7,10 @@ use std::{
 
 use crate::{
     constants::{
-        AF_INET, AF_PACKET, ETH_PROTO_ARP, IPPROTO_IP, IPPROTO_VRRPV2, SOCKET_TTL, SOCK_DGRAM,
-        SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR,
+        AF_INET, AF_PACKET, BROADCAST_MAC_SOCKADDR_LL, ETH_PROTO_ARP, IPPROTO_IP, IPPROTO_VRRPV2,
+        SOCKET_TTL, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR,
     },
-    interface::{get_if_index, set_if_multicast_flag},
+    interface::{get_if_index, get_mac_address, set_if_multicast_flag},
     packet::{GarpPacket, VrrpV2Packet},
 };
 use bincode::Options;
@@ -134,31 +134,22 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
 }
 
 pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
-    let sock_fd = match nix::sys::socket::socket(
-        socket::AddressFamily::Packet,
-        socket::SockType::Raw,
-        SockFlag::empty(),
-        SockProtocol::EthAll,
-    ) {
-        Ok(fd) => fd,
-        Err(err) => {
-            return Err(format!(
-                "Failed to open a raw socket - check the process privileges {}",
-                err.to_string()
-            ));
-        }
-    };
+    let sock_fd: OwnedFd;
 
-    // SOL_SOCKET, SO_BROADCAST
-    match setsockopt(&sock_fd, sockopt::Broadcast, &true) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!(
-                "Error while setting Broadcast option for socket: {}",
-                err
-            ));
-        }
-    };
+    unsafe {
+        sock_fd = match socket(
+            AF_PACKET,
+            SOCK_RAW | SOCK_CLOEXEC,
+            (ETH_PROTO_ARP.to_be()) as i32,
+        ) {
+            -1 => {
+                return Err(format!(
+                    "Failed to open a raw socket - check the process privileges"
+                ));
+            }
+            fd => OwnedFd::from_raw_fd(fd),
+        };
+    }
 
     // SOL_SOCKET, SO_BINDTODEVICE
     match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
@@ -227,10 +218,21 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
 pub fn send_gratuitous_arp(
     sock_fd: i32,
     if_name: String,
-    router_id: u8,
+    _router_id: u8,
     virtual_ip: (Ipv4Addr, u8),
 ) {
-    let mut pkt = GarpPacket::new(virtual_ip.0, router_id);
+    let local_hw_addr = match get_mac_address(&if_name) {
+        Ok(hw_addr) => hw_addr,
+        Err(err) => {
+            error!(
+                "Failed to fetch local hardware address: {}",
+                err.to_string()
+            );
+            return;
+        }
+    };
+
+    let mut pkt = GarpPacket::new(virtual_ip.0, local_hw_addr);
 
     let if_index = match get_if_index(&if_name) {
         Ok(ind) => ind,
@@ -245,12 +247,12 @@ pub fn send_gratuitous_arp(
     unsafe {
         let mut sock_addr = nix::libc::sockaddr_ll {
             sll_family: AF_PACKET as u16,
-            sll_protocol: ETH_PROTO_ARP as u16,
+            sll_protocol: ETH_PROTO_ARP.to_be(),
             sll_ifindex: if_index as i32,
             sll_hatype: 0,
             sll_pkttype: 0,
-            sll_halen: 0,
-            sll_addr: [0; 8],
+            sll_halen: 6,
+            sll_addr: BROADCAST_MAC_SOCKADDR_LL,
         };
 
         let ptr_sockaddr = core::mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sock_addr);

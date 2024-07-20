@@ -1,11 +1,11 @@
-use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr};
+use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, os::fd::AsRawFd};
 
-use interface::get_ip_address;
+use interface::{get_ip_address, get_mac_address};
 use log::{error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
 use serde::{Deserialize, Serialize};
-use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
+use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet, send_gratuitous_arp};
 use tokio::sync::mpsc::{self, Receiver};
 
 mod constants;
@@ -252,10 +252,14 @@ pub fn start_vrrp_listener(if_name: String) {
 }
 
 pub fn debugger(if_name: &str) {
-    match get_ip_address(if_name) {
-        Ok(_addr) => {}
-        Err(err) => {
-            error!("{}", err);
-        }
-    }
+    info!("{}", if_name);
+    _ = get_ip_address(if_name);
+    _ = get_mac_address(if_name);
+    let sock_fd = open_arp_socket(if_name).unwrap();
+    _ = send_gratuitous_arp(
+        sock_fd.as_raw_fd(),
+        if_name.to_string(),
+        50,
+        (Ipv4Addr::new(192, 168, 35, 200), 24),
+    );
 }
