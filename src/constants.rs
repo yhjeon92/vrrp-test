@@ -61,7 +61,13 @@ pub const IFA_LABEL: u16 = 3;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 
+// IP Packet
+pub const IP_VER_IHL: u8 = 0x45; /* Version 4 - IHL 5 (no option) */
+pub const IP_DSCP: u8 = 0xC0;
+
 // VRRPV2
+
+pub const VRRP_VER_TYPE: u8 = 0x21; /* Version 2 - Type 1 */
 pub const VRRP_HDR_LEN: usize = 28;
 pub const VRRP_MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 18);
 

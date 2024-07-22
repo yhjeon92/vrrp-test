@@ -2,7 +2,7 @@ use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp_test::{debugger, start_vrouter_cfile_async, start_vrrp_listener};
+use vrrp_test::{debugger, start_vrouter_cfile, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -40,7 +40,7 @@ fn main() {
 
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(5)
+                .worker_threads(4)
                 .build()
             {
                 Ok(rt) => rt,
@@ -57,7 +57,7 @@ fn main() {
             })
             .expect("failed to setup signal handler");
 
-            runtime.block_on(start_vrouter_cfile_async(
+            runtime.block_on(start_vrouter_cfile(
                 format!("{}", &args.config_file_path),
                 shutdown_rx,
             ));

@@ -4,11 +4,12 @@ use log::{debug, error};
 use serde::Deserialize;
 
 use crate::constants::{
-    BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, NLATTR_ALIGNTO,
-    NLMSG_ALIGNTO, SOCKET_TTL, VRRP_MCAST_ADDR,
+    BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
+    NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
 };
 
 // Size 8
+/* used for adding / deleting ip address to network interface via Netlink socket */
 pub struct IfAddrMessage {
     ifa_family: u8,
     ifa_prefixlen: u8,
@@ -231,7 +232,7 @@ impl GarpPacket {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct VrrpV2Packet {
     // IPv4 Header Fields
     _ip_ver: u8,
@@ -262,10 +263,17 @@ pub struct VrrpV2Packet {
 }
 
 impl VrrpV2Packet {
-    pub fn new() -> VrrpV2Packet {
+    pub fn build(
+        router_id: u8,
+        priority: u8,
+        auth_type: u8,
+        advert_int: u8,
+        vip_addresses: Vec<Ipv4Addr>,
+        auth_data: Vec<u8>,
+    ) -> VrrpV2Packet {
         VrrpV2Packet {
-            _ip_ver: 0x45,
-            _ip_dscp: 0xC0,
+            _ip_ver: IP_VER_IHL,
+            _ip_dscp: IP_DSCP,
             _ip_length: 0,
             _ip_id: 0,
             _ip_flags: 0,
@@ -274,15 +282,15 @@ impl VrrpV2Packet {
             _ip_checksum: 0,
             ip_src: [0, 0, 0, 0],
             _ip_dst: VRRP_MCAST_ADDR.octets(),
-            ver_type: 0x21,
-            router_id: 0,
-            priority: 0,
-            cnt_ip_addr: 0,
-            auth_type: 0,
-            advert_int: 0,
+            ver_type: VRRP_VER_TYPE,
+            router_id,
+            priority,
+            cnt_ip_addr: vip_addresses.len() as u8,
+            auth_type,
+            advert_int,
             checksum: 0,
-            vip_addresses: Vec::new(),
-            auth_data: Vec::new(),
+            vip_addresses,
+            auth_data,
         }
     }
 

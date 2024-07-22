@@ -14,7 +14,7 @@ use crate::{
     packet::{GarpPacket, VrrpV2Packet},
 };
 use bincode::Options;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
@@ -215,20 +215,35 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     Ok(sock_fd)
 }
 
+pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) {
+    match nix::sys::socket::sendto(
+        sock_fd.as_raw_fd(),
+        &vrrp_pkt.to_bytes().as_slice(),
+        &SockaddrIn::new(224, 0, 0, 18, 112),
+        MsgFlags::empty(),
+    ) {
+        Ok(_) => {
+            debug!("Sent VRRP advertisement");
+        }
+        Err(err) => {
+            warn!("Failed to send VRRP advertisement: {}", err.to_string());
+        }
+    }
+}
+
 pub fn send_gratuitous_arp(
     sock_fd: i32,
     if_name: String,
     _router_id: u8,
     virtual_ip: (Ipv4Addr, u8),
-) {
+) -> Result<(), String> {
     let local_hw_addr = match get_mac_address(&if_name) {
         Ok(hw_addr) => hw_addr,
         Err(err) => {
-            error!(
+            return Err(format!(
                 "Failed to fetch local hardware address: {}",
                 err.to_string()
-            );
-            return;
+            ));
         }
     };
 
@@ -236,10 +251,7 @@ pub fn send_gratuitous_arp(
 
     let if_index = match get_if_index(&if_name) {
         Ok(ind) => ind,
-        Err(err) => {
-            error!("{}", err);
-            return;
-        }
+        Err(err) => return Err(format!("Cannot find interface named {}: {}", &if_name, err)),
     };
 
     debug!("interface {} index {}", if_name, if_index);
@@ -260,8 +272,10 @@ pub fn send_gratuitous_arp(
         let sock_addr = match LinkAddr::from_raw(ptr_sockaddr, None) {
             Some(addr) => addr,
             None => {
-                error!("Failed to construct sockaddr");
-                return;
+                return Err(format!(
+                    "Failed to initialize sockaddr: {}",
+                    std::io::Error::last_os_error().to_string()
+                ));
             }
         };
 
@@ -273,13 +287,12 @@ pub fn send_gratuitous_arp(
         ) {
             Ok(size) => {
                 info!("Sent a GARP of len {}", size);
+                Ok(())
             }
-            Err(err) => {
-                warn!(
-                    "An error was encountered while sending GARP request! {}",
-                    err.to_string()
-                );
-            }
+            Err(err) => Err(format!(
+                "An error was encountered while sending GARP request: {}",
+                err.to_string()
+            )),
         }
     }
 }

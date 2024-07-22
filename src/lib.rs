@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, mem::size_of, net::Ipv4Addr, os::fd::AsRawFd};
+use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::AsRawFd};
 
 use interface::{get_ip_address, get_mac_address};
 use log::{error, info, warn};
@@ -91,7 +91,7 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
     }
 }
 
-pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
+pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
     let if_name = config.interface.clone();
     let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
         Ok(fd) => fd,
@@ -103,7 +103,7 @@ pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receive
 
     let mut pkt_buf: [u8; 1024] = [0u8; 1024];
 
-    let (tx, rx) = mpsc::channel::<Event>(size_of::<Event>());
+    let (tx, rx) = mpsc::channel::<Event>(3);
 
     let arp_sock_fd = match open_arp_socket(&if_name) {
         Ok(fd) => fd,
@@ -144,24 +144,13 @@ pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receive
 
     let tx_handle = tx.clone();
 
-    tokio::task::spawn(async move {
-        loop {
-            match shutdown_rx.recv().await {
-                Some(()) => {
-                    _ = tx_handle.clone().send(Event::ShutDown).await;
-                }
-                None => {}
-            }
-        }
-    });
-
     _ = tx.send(Event::Startup).await;
 
     info!("Router Startup");
     info!("Listening for vRRPv2 packets...");
 
     // Main Loop
-    loop {
+    tokio::task::spawn_blocking(move || loop {
         let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
             Ok(pkt) => pkt,
             Err(err) => {
@@ -176,14 +165,11 @@ pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receive
 
         match vrrp_pkt.verify_checksum() {
             Ok(_) => {
-                match tx
-                    .send(Event::AdvertReceived(
-                        router_id,
-                        priority,
-                        Ipv4Addr::from(src_addr),
-                    ))
-                    .await
-                {
+                match tx.blocking_send(Event::AdvertReceived(
+                    router_id,
+                    priority,
+                    Ipv4Addr::from(src_addr),
+                )) {
                     Ok(()) => {}
                     Err(err) => {
                         error!("Failed to send event: {}", err.to_string());
@@ -194,10 +180,61 @@ pub async fn start_vrouter_async(config: VRouterConfig, mut shutdown_rx: Receive
                 warn!("Invalid VRRP packet received: {}", err);
             }
         }
+    });
+
+    // loop {
+    //     let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
+    //         Ok(pkt) => pkt,
+    //         Err(err) => {
+    //             error!("{}", err.to_string());
+    //             continue;
+    //         }
+    //     };
+
+    //     let router_id = vrrp_pkt.router_id;
+    //     let priority = vrrp_pkt.priority;
+    //     let src_addr = vrrp_pkt.ip_src.clone();
+
+    //     debug!(
+    //         "{} - {} - {}",
+    //         router_id,
+    //         priority,
+    //         Ipv4Addr::from(src_addr)
+    //     );
+
+    //     match vrrp_pkt.verify_checksum() {
+    //         Ok(_) => {
+    //             match tx
+    //                 .send(Event::AdvertReceived(
+    //                     router_id,
+    //                     priority,
+    //                     Ipv4Addr::from(src_addr),
+    //                 ))
+    //                 .await
+    //             {
+    //                 Ok(()) => {}
+    //                 Err(err) => {
+    //                     error!("Failed to send event: {}", err.to_string());
+    //                 }
+    //             }
+    //         }
+    //         Err(err) => {
+    //             warn!("Invalid VRRP packet received: {}", err);
+    //         }
+    //     }
+    // }
+
+    loop {
+        match shutdown_rx.recv().await {
+            Some(()) => {
+                _ = tx_handle.clone().send(Event::ShutDown).await;
+            }
+            None => {}
+        }
     }
 }
 
-pub async fn start_vrouter_cfile_async(config_file_path: String, shutdown_rx: Receiver<()>) {
+pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver<()>) {
     let config = match read_config(&config_file_path) {
         Some(config) => config,
         None => {
@@ -205,7 +242,7 @@ pub async fn start_vrouter_cfile_async(config_file_path: String, shutdown_rx: Re
         }
     };
 
-    start_vrouter_async(config, shutdown_rx).await;
+    start_vrouter(config, shutdown_rx).await;
 }
 
 pub fn start_vrrp_listener(if_name: String) {

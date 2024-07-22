@@ -1,19 +1,17 @@
 use core::fmt;
 use std::{
-    mem::size_of,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
     time::Duration,
 };
 
 use log::{debug, error, info, warn};
-use nix::sys::socket::{MsgFlags, SockaddrIn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
-    socket::send_gratuitous_arp,
+    socket::{send_advertisement, send_gratuitous_arp},
     VRouterConfig,
 };
 
@@ -87,10 +85,12 @@ pub struct Router {
     router_id: u8,
     priority: u8,
     advert_int: u8,
+    auth_type: u8,
     master_down_int: f32,
     skew_time: f32,
     preempt_mode: bool,
     virtual_ip: (Ipv4Addr, u8),
+    auth_data: Vec<u8>,
     router_tx: Sender<Event>,
     router_rx: Receiver<Event>,
 }
@@ -121,11 +121,16 @@ impl Router {
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
+            // TODO
+            auth_type: 1,
             master_down_int: (3 as f32 * config.advert_int as f32)
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             preempt_mode: true,
+            // TODO: multiple VIPs
             virtual_ip: (config.virtual_ip, config.netmask_len),
+            // TODO
+            auth_data: [49, 49, 49, 49, 0, 0, 0, 0].to_vec(),
             router_tx: tx,
             router_rx: rx,
         })
@@ -135,7 +140,14 @@ impl Router {
     pub async fn start(&mut self) {
         info!("Router thread running...");
 
-        let advert_pkt = self.build_packet();
+        let advert_pkt = VrrpV2Packet::build(
+            self.router_id,
+            self.priority,
+            self.auth_type,
+            self.advert_int,
+            Vec::<Ipv4Addr>::from([self.virtual_ip.0]),
+            self.auth_data.clone(),
+        );
 
         info!("MASTER DOWN INTERVAL set to {}", self.master_down_int);
 
@@ -162,12 +174,22 @@ impl Router {
                                         );
 
                                         // Broadcast Gratuitous ARP
-                                        send_gratuitous_arp(
+                                        match send_gratuitous_arp(
                                             self.arp_sock_fd.as_raw_fd(),
                                             self.if_name.clone(),
                                             self.router_id,
                                             self.virtual_ip,
-                                        );
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                error!(
+                                                    "Failed to send gratuitous ARP request: {}",
+                                                    err
+                                                );
+                                                error!("exiting...");
+                                                return;
+                                            }
+                                        }
 
                                         // Add Virtual IP to the interface
                                         match add_ip_address(&self.if_name, self.virtual_ip) {
@@ -317,12 +339,19 @@ impl Router {
                                 send_advertisement(self.sock_fd.as_raw_fd(), advert_pkt.clone());
 
                                 // Broadcast Gratuitous ARP
-                                send_gratuitous_arp(
+                                match send_gratuitous_arp(
                                     self.arp_sock_fd.as_raw_fd(),
                                     self.if_name.clone(),
                                     self.router_id,
                                     self.virtual_ip,
-                                );
+                                ) {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        error!("Failed to send gratuitous ARP request: {}", err);
+                                        error!("exiting...");
+                                        return;
+                                    }
+                                }
 
                                 // Start advertisement timer
                                 advert_timer_tx = Some(start_advert_timer(
@@ -378,8 +407,16 @@ impl Router {
                                     None => { /* */ }
                                 };
                                 // TODO: Send an advert with priority = 0
-                                let pkt = self.build_packet_with_priority(0);
-                                send_advertisement(self.sock_fd.as_raw_fd(), pkt);
+                                let elect_pkt = VrrpV2Packet::build(
+                                    self.router_id,
+                                    0, /* Priority of 0 indicates Master stopped participating in VRRP */
+                                    self.auth_type,
+                                    self.advert_int,
+                                    Vec::<Ipv4Addr>::from([self.virtual_ip.0]),
+                                    self.auth_data.clone(),
+                                );
+
+                                send_advertisement(self.sock_fd.as_raw_fd(), elect_pkt);
 
                                 // Demote to initialize state
                                 info!("Demoting to INITIALIZE state..");
@@ -399,74 +436,21 @@ impl Router {
             }
         }
     }
-
-    fn build_packet(&self) -> Vec<u8> {
-        let mut pkt_hdr = VrrpV2Packet::new();
-        pkt_hdr.router_id = self.router_id;
-        pkt_hdr.priority = self.priority;
-        pkt_hdr.cnt_ip_addr = 1;
-        pkt_hdr.auth_type = 1;
-        pkt_hdr.advert_int = self.advert_int;
-
-        let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-        vip_addresses.push(self.virtual_ip.0);
-
-        pkt_hdr.set_vip_addresses(&vip_addresses);
-
-        // TODO
-        let auth_data = [49, 49, 49, 49, 0, 0, 0, 0].to_vec();
-
-        pkt_hdr.set_auth_data(&auth_data);
-
-        pkt_hdr.to_bytes()
-    }
-
-    fn build_packet_with_priority(&self, priority: u8) -> Vec<u8> {
-        let mut pkt_hdr = VrrpV2Packet::new();
-        pkt_hdr.router_id = self.router_id;
-        pkt_hdr.priority = priority;
-        pkt_hdr.cnt_ip_addr = 1;
-        pkt_hdr.auth_type = 1;
-        pkt_hdr.advert_int = self.advert_int;
-
-        let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-        vip_addresses.push(self.virtual_ip.0);
-
-        pkt_hdr.set_vip_addresses(&vip_addresses);
-
-        // TODO
-        let auth_data = [49, 49, 49, 49, 0, 0, 0, 0].to_vec();
-
-        pkt_hdr.set_auth_data(&auth_data);
-
-        pkt_hdr.to_bytes()
-    }
 }
 
-pub fn send_advertisement(sock_fd: i32, pkt_vec: Vec<u8>) {
-    match nix::sys::socket::sendto(
-        sock_fd.as_raw_fd(),
-        &pkt_vec.as_slice(),
-        &SockaddrIn::new(224, 0, 0, 18, 112),
-        MsgFlags::empty(),
-    ) {
-        Ok(_) => {
-            debug!("Sent VRRP advertisement");
-        }
-        Err(err) => {
-            warn!("Failed to send VRRP advertisement: {}", err.to_string());
-        }
-    }
-}
-
-fn start_advert_timer(advert_int: u8, sock_fd: i32, pkt_vec: Vec<u8>) -> Sender<TimerEvent> {
-    let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
-    tokio::task::spawn(async move { advert_timer(advert_int, sock_fd, pkt_vec, rx).await });
+fn start_advert_timer(advert_int: u8, sock_fd: i32, vrrp_pkt: VrrpV2Packet) -> Sender<TimerEvent> {
+    let (tx, rx) = channel::<TimerEvent>(3);
+    tokio::task::spawn(async move { advert_timer(advert_int, sock_fd, vrrp_pkt, rx).await });
 
     tx
 }
 
-async fn advert_timer(interval: u8, sock_fd: i32, pkt_vec: Vec<u8>, mut rx: Receiver<TimerEvent>) {
+async fn advert_timer(
+    interval: u8,
+    sock_fd: i32,
+    vrrp_pkt: VrrpV2Packet,
+    mut rx: Receiver<TimerEvent>,
+) {
     let mut timer_int = interval.clone();
     loop {
         debug!("starting advertisement timer!");
@@ -496,14 +480,15 @@ async fn advert_timer(interval: u8, sock_fd: i32, pkt_vec: Vec<u8>, mut rx: Rece
                 }
             },
             () = &mut sleep => {
-                send_advertisement(sock_fd, pkt_vec.clone());
+                send_advertisement(sock_fd, vrrp_pkt.clone());
             }
         }
     }
 }
 
 fn start_master_down_timer(interval: f32, router_tx: Sender<Event>) -> Sender<TimerEvent> {
-    let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
+    // let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
+    let (tx, rx) = channel::<TimerEvent>(1);
     tokio::task::spawn(async move { master_down_timer(interval, router_tx, rx).await });
 
     tx
