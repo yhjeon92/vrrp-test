@@ -162,16 +162,20 @@ impl Router {
 
                     match event {
                         Event::Startup => {
-                            // TODO: Startup
                             match self.state {
                                 State::Initialize => {
                                     // Do things..
                                     if self.priority == 0xFF {
                                         // Multicast Advertisement
-                                        send_advertisement(
+                                        match send_advertisement(
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
-                                        );
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                warn!("Failed to send VRRP advertisement: {}", err);
+                                            }
+                                        }
 
                                         // Broadcast Gratuitous ARP
                                         match send_gratuitous_arp(
@@ -243,6 +247,7 @@ impl Router {
 
                                 if router_id == self.router_id {
                                     if priority == 0 {
+                                        /* MASTER stopped participating in VRRP */
                                         // Reset master down timer to skew_time
                                         warn!("VRRPv2 advert of priority 0 received.");
                                         match master_timer_tx {
@@ -275,10 +280,16 @@ impl Router {
                             State::Master => {
                                 if router_id == self.router_id {
                                     if priority == 0 {
-                                        send_advertisement(
+                                        // Send VRRPv2 advertisement
+                                        match send_advertisement(
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
-                                        );
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                warn!("Failed to send VRRP advertisement: {}", err);
+                                            }
+                                        }
                                         // Set advert timer to advert_int
                                         match advert_timer_tx {
                                             Some(ref tx) => {
@@ -309,7 +320,7 @@ impl Router {
                                                 _ = tx.send(TimerEvent::Abort).await;
                                             }
                                             None => {
-                                                error!("Failed to find bindings for advert timer!");
+                                                warn!("Failed to find bindings for advert timer!");
                                             }
                                         };
 
@@ -335,8 +346,18 @@ impl Router {
                         },
                         Event::MasterDown => match self.state {
                             State::Backup => {
+                                warn!("Master down interval expired.");
+
                                 // Multicast Advertisement
-                                send_advertisement(self.sock_fd.as_raw_fd(), advert_pkt.clone());
+                                match send_advertisement(
+                                    self.sock_fd.as_raw_fd(),
+                                    advert_pkt.clone(),
+                                ) {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        warn!("Failed to send VRRP advertisement: {}", err);
+                                    }
+                                }
 
                                 // Broadcast Gratuitous ARP
                                 match send_gratuitous_arp(
@@ -360,7 +381,7 @@ impl Router {
                                     advert_pkt.clone(),
                                 ));
 
-                                // TODO: Set Virtual IP to an interface
+                                // Set Virtual IP to an interface
                                 match add_ip_address(&self.if_name, self.virtual_ip) {
                                     Ok(_) => {}
                                     Err(err) => {
@@ -374,11 +395,12 @@ impl Router {
                                     }
                                 }
 
-                                warn!("Master down interval expired.");
                                 // Stop master down timer
                                 match master_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
-                                    None => { /*  */ }
+                                    None => {
+                                        warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                    }
                                 };
 
                                 info!("Promoting to MASTER state..");
@@ -393,7 +415,9 @@ impl Router {
                                 // Stop master down timer
                                 match master_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
-                                    None => { /*  */ }
+                                    None => {
+                                        warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                    }
                                 };
 
                                 // Demote to initialize state
@@ -404,9 +428,11 @@ impl Router {
                                 // Stop advert timer
                                 match advert_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
-                                    None => { /* */ }
+                                    None => {
+                                        warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                    }
                                 };
-                                // TODO: Send an advert with priority = 0
+
                                 let elect_pkt = VrrpV2Packet::build(
                                     self.router_id,
                                     0, /* Priority of 0 indicates Master stopped participating in VRRP */
@@ -416,7 +442,12 @@ impl Router {
                                     self.auth_data.clone(),
                                 );
 
-                                send_advertisement(self.sock_fd.as_raw_fd(), elect_pkt);
+                                match send_advertisement(self.sock_fd.as_raw_fd(), elect_pkt) {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        warn!("Failed to send VRRP advertisement: {}", err);
+                                    }
+                                }
 
                                 // Demote to initialize state
                                 info!("Demoting to INITIALIZE state..");
@@ -480,7 +511,12 @@ async fn advert_timer(
                 }
             },
             () = &mut sleep => {
-                send_advertisement(sock_fd, vrrp_pkt.clone());
+                match send_advertisement(sock_fd, vrrp_pkt.clone()) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!("Failed to send VRRP advertisement: {}", err);
+                    }
+                }
             }
         }
     }

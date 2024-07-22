@@ -14,7 +14,7 @@ use crate::{
     packet::{GarpPacket, VrrpV2Packet},
 };
 use bincode::Options;
-use log::{debug, info, warn};
+use log::debug;
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
@@ -215,19 +215,15 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     Ok(sock_fd)
 }
 
-pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) {
+pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) -> Result<(), String> {
     match nix::sys::socket::sendto(
         sock_fd.as_raw_fd(),
         &vrrp_pkt.to_bytes().as_slice(),
         &SockaddrIn::new(224, 0, 0, 18, 112),
         MsgFlags::empty(),
     ) {
-        Ok(_) => {
-            debug!("Sent VRRP advertisement");
-        }
-        Err(err) => {
-            warn!("Failed to send VRRP advertisement: {}", err.to_string());
-        }
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!("{}", err.to_string())),
     }
 }
 
@@ -286,7 +282,10 @@ pub fn send_gratuitous_arp(
             MsgFlags::empty(),
         ) {
             Ok(size) => {
-                info!("Sent a GARP of len {}", size);
+                debug!(
+                    "Broadcasted gratuitious ARP for {}: len {}",
+                    virtual_ip.0, size
+                );
                 Ok(())
             }
             Err(err) => Err(format!(
