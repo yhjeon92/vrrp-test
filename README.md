@@ -1,6 +1,6 @@
 ## VRRP Testing Tool
 
-- Test suite for VRRPv2 packet receiving / transmission, written in Rust programming language. Only available on Linux based operating system.
+- Test suite for virtual router running with VRRPv2 protocol, written in Rust programming language. Only available on Linux based operating system.
 
 #### Build
 
@@ -10,6 +10,8 @@ $ cargo build
 $ cargo build --release
 ```
 
+- Executable binary will be created under `target/debug` and `target/release`, respectively.
+
 #### Run
 
 ```shell
@@ -17,13 +19,13 @@ $ cargo build --release
 $ sudo vrrp-test -i $TARGET_INTERFACE
 
 # Run in router mode (Send VRRPv2 advertisement packet periodically)
-$ sudo vrrp-test -i $TARGET_INTERFACE -r
+$ sudo vrrp-test -r
 ```
 
 - Specify configuration file path with command line option -c
 
 ```shell
-$ sudo vrrp-test -i $TARGET_INTERFACE -c $CONFIG_FILE_PATH
+$ sudo vrrp-test -r -c $CONFIG_FILE_PATH
 ```
 
 #### Configuration
@@ -35,16 +37,14 @@ interface = "eth0"
 router_id = 50
 priority = 100
 advert_int = 5
-virtual_ip = "192.168.35.200"
-netmask_len = 24
+vip_addresses = [ "192.168.35.200/24" ]
 ```
 
 - `interface` is the name of network interface to run virutal router on.
 - `router_id` is the virtual router Id.
 - `priority` is the priority assigned to virtual router.
 - `advert_int` is the interval to multicast VRRPv2 advertisement. Unit is second.
-- `virtual_ip` is the IPv4 address of virtual IP.
-- `netmask_len` is the subnet mask length of above given virtual ip.
+- `vip_addresses` is the TOML array of IPv4 address (with netmask length) of virtual IPs you'd like to assign to the virtual router.
 
 #### Testing with Docker compose
 
