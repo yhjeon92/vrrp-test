@@ -2,5 +2,4 @@ interface = "eth0"
 router_id = 50
 priority = 100
 advert_int = 5
-virtual_ip = "192.168.35.200"
-netmask_len = 24
+vip_addresses = [ "192.168.35.200/24", "192.168.35.199/24" ]
