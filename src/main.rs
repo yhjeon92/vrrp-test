@@ -2,7 +2,7 @@ use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp_test::{debugger, start_vrouter_cfile, start_vrrp_listener};
+use vrrp_test::{start_vrouter_cfile, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -27,10 +27,11 @@ fn main() {
     let args = Args::parse();
 
     std::env::set_var("RUST_LOG", if args.verbose { "debug" } else { "info" });
+
     env_logger::init();
 
     if args.debug {
-        debugger(&args.interface);
+        /* Test code here */
         return;
     }
 
@@ -40,7 +41,7 @@ fn main() {
 
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(4)
+                .worker_threads(3)
                 .build()
             {
                 Ok(rt) => rt,

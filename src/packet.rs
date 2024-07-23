@@ -351,7 +351,8 @@ impl VrrpV2Packet {
         return bytes;
     }
 
-    pub fn verify_checksum(&self) -> Result<(), String> {
+    /* RFC 3768 7.1 Receiving VRRP Packets */
+    pub fn verify(&self) -> Result<(), String> {
         if self.ip_ttl != 0xFF {
             return Err(format!("Packet TTL {} is not valid", self.ip_ttl));
         }

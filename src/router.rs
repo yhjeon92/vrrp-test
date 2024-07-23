@@ -12,7 +12,7 @@ use crate::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
     socket::{send_advertisement, send_gratuitous_arp},
-    VRouterConfig,
+    Ipv4WithNetmask, VRouterConfig,
 };
 
 pub enum State {
@@ -89,7 +89,7 @@ pub struct Router {
     master_down_int: f32,
     skew_time: f32,
     preempt_mode: bool,
-    virtual_ip: (Ipv4Addr, u8),
+    vip_addresses: Vec<Ipv4WithNetmask>,
     auth_data: Vec<u8>,
     router_tx: Sender<Event>,
     router_rx: Receiver<Event>,
@@ -128,7 +128,7 @@ impl Router {
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             preempt_mode: true,
             // TODO: multiple VIPs
-            virtual_ip: (config.virtual_ip, config.netmask_len),
+            vip_addresses: config.vip_addresses,
             // TODO
             auth_data: [49, 49, 49, 49, 0, 0, 0, 0].to_vec(),
             router_tx: tx,
@@ -145,7 +145,12 @@ impl Router {
             self.priority,
             self.auth_type,
             self.advert_int,
-            Vec::<Ipv4Addr>::from([self.virtual_ip.0]),
+            Vec::<Ipv4Addr>::from(
+                self.vip_addresses
+                    .iter()
+                    .map(|addr| addr.address)
+                    .collect::<Vec<Ipv4Addr>>(),
+            ),
             self.auth_data.clone(),
         );
 
@@ -177,31 +182,34 @@ impl Router {
                                             }
                                         }
 
-                                        // Broadcast Gratuitous ARP
-                                        match send_gratuitous_arp(
-                                            self.arp_sock_fd.as_raw_fd(),
-                                            self.if_name.clone(),
-                                            self.router_id,
-                                            self.virtual_ip,
-                                        ) {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                error!(
-                                                    "Failed to send gratuitous ARP request: {}",
-                                                    err
-                                                );
-                                                error!("exiting...");
-                                                return;
+                                        for virtual_ip in self.vip_addresses.iter() {
+                                            // Broadcast Gratuitous ARP
+                                            match send_gratuitous_arp(
+                                                self.arp_sock_fd.as_raw_fd(),
+                                                &self.if_name,
+                                                self.router_id,
+                                                virtual_ip,
+                                            ) {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    error!(
+                                                        "Failed to send gratuitous ARP request: {}",
+                                                        err
+                                                    );
+                                                    error!("exiting...");
+                                                    return;
+                                                }
                                             }
-                                        }
 
-                                        // Add Virtual IP to the interface
-                                        match add_ip_address(&self.if_name, self.virtual_ip) {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                error!("Failed to add IP address {}/{} to interface {}: {}", self.virtual_ip.0.to_string(), self.virtual_ip.1, &self.if_name, err);
-                                                error!("exiting...");
-                                                return;
+                                            // Add virtual ip address to interface
+                                            match add_ip_address(&self.if_name, virtual_ip) {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    error!("Failed to add IP address {} to interface {}: {}",
+                                                    virtual_ip, &self.if_name, err);
+                                                    error!("exiting...");
+                                                    return;
+                                                }
                                             }
                                         }
 
@@ -305,13 +313,15 @@ impl Router {
                                     } else if (!self.preempt_mode || priority > self.priority)
                                         || (priority == self.priority && src_addr > self.local_addr)
                                     {
-                                        // Delete virtual ip bound to interface
-                                        match del_ip_address(&self.if_name, self.virtual_ip) {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                error!("Failed to delete IP address {}/{} from interface {}: {}", self.virtual_ip.0.to_string(), self.virtual_ip.1, &self.if_name, err);
-                                                error!("exiting...");
-                                                return;
+                                        for virtual_ip in self.vip_addresses.iter() {
+                                            // Delete virtual ip bound to interface
+                                            match del_ip_address(&self.if_name, virtual_ip) {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
+                                                    error!("exiting..");
+                                                    return;
+                                                }
                                             }
                                         }
                                         // Stop advert timer
@@ -359,18 +369,36 @@ impl Router {
                                     }
                                 }
 
-                                // Broadcast Gratuitous ARP
-                                match send_gratuitous_arp(
-                                    self.arp_sock_fd.as_raw_fd(),
-                                    self.if_name.clone(),
-                                    self.router_id,
-                                    self.virtual_ip,
-                                ) {
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        error!("Failed to send gratuitous ARP request: {}", err);
-                                        error!("exiting...");
-                                        return;
+                                for virtual_ip in self.vip_addresses.iter() {
+                                    // Broadcast Gratuitous ARP
+                                    match send_gratuitous_arp(
+                                        self.arp_sock_fd.as_raw_fd(),
+                                        &self.if_name,
+                                        self.router_id,
+                                        virtual_ip,
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            error!(
+                                                "Failed to send gratuitous ARP request: {}",
+                                                err
+                                            );
+                                            error!("exiting...");
+                                            return;
+                                        }
+                                    }
+
+                                    // Add virtual ip address to interface
+                                    match add_ip_address(&self.if_name, virtual_ip) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            error!(
+                                                "Failed to add IP address {} to interface {}: {}",
+                                                virtual_ip, &self.if_name, err
+                                            );
+                                            error!("exiting...");
+                                            return;
+                                        }
                                     }
                                 }
 
@@ -380,20 +408,6 @@ impl Router {
                                     self.sock_fd.as_raw_fd(),
                                     advert_pkt.clone(),
                                 ));
-
-                                // Set Virtual IP to an interface
-                                match add_ip_address(&self.if_name, self.virtual_ip) {
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        error!(
-                                            "Failed to add IP address {}/{} to interface {}: {}",
-                                            self.virtual_ip.0.to_string(),
-                                            self.virtual_ip.1,
-                                            &self.if_name,
-                                            err
-                                        );
-                                    }
-                                }
 
                                 // Stop master down timer
                                 match master_timer_tx {
@@ -412,6 +426,7 @@ impl Router {
                         },
                         Event::ShutDown => match self.state {
                             State::Backup => {
+                                /* Shutting down BACKUP */
                                 // Stop master down timer
                                 match master_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
@@ -425,6 +440,7 @@ impl Router {
                                 self.state = State::Initialize;
                             }
                             State::Master => {
+                                /* Shutting down MASTER */
                                 // Stop advert timer
                                 match advert_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
@@ -433,12 +449,29 @@ impl Router {
                                     }
                                 };
 
+                                for virtual_ip in self.vip_addresses.iter() {
+                                    // Delete virtual ip bound to interface
+                                    match del_ip_address(&self.if_name, virtual_ip) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
+                                            error!("exiting..");
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 let elect_pkt = VrrpV2Packet::build(
                                     self.router_id,
                                     0, /* Priority of 0 indicates Master stopped participating in VRRP */
                                     self.auth_type,
                                     self.advert_int,
-                                    Vec::<Ipv4Addr>::from([self.virtual_ip.0]),
+                                    Vec::<Ipv4Addr>::from(
+                                        self.vip_addresses
+                                            .iter()
+                                            .map(|addr| addr.address)
+                                            .collect::<Vec<Ipv4Addr>>(),
+                                    ),
                                     self.auth_data.clone(),
                                 );
 

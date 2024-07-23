@@ -12,6 +12,7 @@ use crate::{
     },
     interface::{get_if_index, get_mac_address, set_if_multicast_flag},
     packet::{GarpPacket, VrrpV2Packet},
+    Ipv4WithNetmask,
 };
 use bincode::Options;
 use log::debug;
@@ -229,9 +230,9 @@ pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) -> Result<()
 
 pub fn send_gratuitous_arp(
     sock_fd: i32,
-    if_name: String,
+    if_name: &str,
     _router_id: u8,
-    virtual_ip: (Ipv4Addr, u8),
+    virtual_ip: &Ipv4WithNetmask,
 ) -> Result<(), String> {
     let local_hw_addr = match get_mac_address(&if_name) {
         Ok(hw_addr) => hw_addr,
@@ -243,7 +244,7 @@ pub fn send_gratuitous_arp(
         }
     };
 
-    let mut pkt = GarpPacket::new(virtual_ip.0, local_hw_addr);
+    let mut pkt = GarpPacket::new(virtual_ip.address, local_hw_addr);
 
     let if_index = match get_if_index(&if_name) {
         Ok(ind) => ind,
@@ -284,7 +285,7 @@ pub fn send_gratuitous_arp(
             Ok(size) => {
                 debug!(
                     "Broadcasted gratuitious ARP for {}: len {}",
-                    virtual_ip.0, size
+                    virtual_ip.address, size
                 );
                 Ok(())
             }
@@ -304,7 +305,7 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
         }
     };
 
-    // bincode::deserialize와 bincode::Options::deserialize의 동작이 다르므로 fixint encoding으로 변경함
+    // Default bincode::deserialize does not support big endian with fixint
     let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .allow_trailing_bytes()

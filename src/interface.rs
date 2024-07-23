@@ -20,6 +20,7 @@ use crate::{
     },
     packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
     socket::{open_ip_socket, open_netlink_socket},
+    Ipv4WithNetmask,
 };
 
 struct IfrFlags {
@@ -216,7 +217,7 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
     }
 }
 
-pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), String> {
+pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
@@ -241,7 +242,13 @@ pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
 
     let mut payload_bytes = Vec::<u8>::new();
 
-    let ifa_msg = IfAddrMessage::new(AF_INET as u8, address.1, 0u8, RT_SCOPE_UNIVERSE, if_ind);
+    let ifa_msg = IfAddrMessage::new(
+        AF_INET as u8,
+        address.netmask,
+        0u8,
+        RT_SCOPE_UNIVERSE,
+        if_ind,
+    );
 
     payload_bytes.append(&mut ifa_msg.to_bytes());
     payload_bytes.append(
@@ -249,9 +256,10 @@ pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_LOCAL,
         )
-        .to_bytes(&mut Vec::from(address.0.octets())),
+        .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
+    // TODO
     let if_label = format!("{}:1", if_name);
 
     payload_bytes.append(
@@ -267,7 +275,7 @@ pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_ADDRESS,
         )
-        .to_bytes(&mut Vec::from(address.0.octets())),
+        .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
     let cmsg: [ControlMessage; 0] = [];
@@ -330,7 +338,7 @@ pub fn add_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
     }
 }
 
-pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), String> {
+pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), String> {
     let nl_sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
@@ -349,7 +357,13 @@ pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
 
     let mut payload_bytes = Vec::<u8>::new();
 
-    let ifa_msg = IfAddrMessage::new(AF_INET as u8, address.1, 0u8, RT_SCOPE_UNIVERSE, if_ind);
+    let ifa_msg = IfAddrMessage::new(
+        AF_INET as u8,
+        address.netmask,
+        0u8,
+        RT_SCOPE_UNIVERSE,
+        if_ind,
+    );
 
     payload_bytes.append(&mut ifa_msg.to_bytes());
     payload_bytes.append(
@@ -357,7 +371,7 @@ pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_LOCAL,
         )
-        .to_bytes(&mut Vec::from(address.0.octets())),
+        .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
     let if_label = format!("{}:1", if_name);
@@ -375,7 +389,7 @@ pub fn del_ip_address(if_name: &str, address: (Ipv4Addr, u8)) -> Result<(), Stri
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
             IFA_ADDRESS,
         )
-        .to_bytes(&mut Vec::from(address.0.octets())),
+        .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
     let cmsg: [ControlMessage; 0] = [];

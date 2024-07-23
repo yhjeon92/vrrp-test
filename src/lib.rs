@@ -1,11 +1,14 @@
-use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::AsRawFd};
+use core::fmt;
+use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
 
-use interface::{get_ip_address, get_mac_address};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
-use serde::{Deserialize, Serialize};
-use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet, send_gratuitous_arp};
+use serde::{
+    de::Error,
+    {Deserialize, Serialize},
+};
+use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
 use tokio::sync::mpsc::{self, Receiver};
 
 mod constants;
@@ -14,14 +17,65 @@ mod packet;
 mod router;
 mod socket;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Clone)]
+pub struct Ipv4WithNetmask {
+    pub address: Ipv4Addr,
+    pub netmask: u8,
+}
+
+impl fmt::Display for Ipv4WithNetmask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.address, self.netmask)
+    }
+}
+
+impl<'de> serde::de::Deserialize<'de> for Ipv4WithNetmask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let masked_address = String::deserialize(deserializer)?;
+
+        if !masked_address.contains("/") {
+            return Err(D::Error::custom(format!(
+                "Invalid address {}: must include netmask length",
+                masked_address
+            )));
+        }
+
+        let data_vec: Vec<&str> = masked_address.split("/").collect();
+
+        if data_vec.len() != 2 {
+            return Err(D::Error::custom(format!(
+                "Invalid address {}: must include netmask length",
+                masked_address
+            )));
+        }
+
+        Ok(Ipv4WithNetmask {
+            address: match Ipv4Addr::from_str(data_vec[0]) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    return Err(D::Error::custom(err.to_string()));
+                }
+            },
+            netmask: match u8::from_str(data_vec[1]) {
+                Ok(mask) => mask,
+                Err(err) => {
+                    return Err(D::Error::custom(err.to_string()));
+                }
+            },
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct VRouterConfig {
     pub interface: String,
     pub router_id: u8,
     pub priority: u8,
     pub advert_int: u8,
-    pub virtual_ip: Ipv4Addr,
-    pub netmask_len: u8,
+    pub vip_addresses: Vec<Ipv4WithNetmask>,
 }
 
 impl VRouterConfig {
@@ -53,20 +107,28 @@ impl VRouterConfig {
 
         match toml::from_str::<VRouterConfig>(&contents) {
             Ok(config) => {
-                if config.netmask_len < 8 || config.netmask_len > 31 {
-                    error!("Invalid virtual ip netmask length {}", config.netmask_len);
+                if config.vip_addresses.len() < 1 {
+                    error!("No virtual ip is configured");
                     return None;
+                }
+
+                for virtual_ip in config.vip_addresses.iter() {
+                    if virtual_ip.netmask < 8 || virtual_ip.netmask > 31 {
+                        error!("Invalid virtual ip netmask length {}", virtual_ip.netmask);
+                        return None;
+                    }
                 }
                 info!("Router configured:");
                 info!("\tInterface       {}", config.interface);
                 info!("\tRouter ID       {}", config.router_id);
                 info!("\tPriority        {}", config.priority);
                 info!("\tAdvert Interval {}s", config.advert_int);
-                info!(
-                    "\tVirtual IP      {}/{}",
-                    config.virtual_ip.to_string(),
-                    config.netmask_len
-                );
+                info!("\tVIP addresses");
+
+                for virtual_ip in config.vip_addresses.iter() {
+                    info!("\t\t- {}/{}", virtual_ip.address, virtual_ip.netmask);
+                }
+
                 Some(config)
             }
             Err(err) => {
@@ -128,7 +190,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         arp_sock_fd,
         tx.clone(),
         rx,
-        config,
+        config.clone(),
     ) {
         Ok(router) => router,
         Err(err) => {
@@ -140,7 +202,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         }
     };
 
-    tokio::task::spawn(async move { router.start().await });
+    tokio::spawn(async move { router.start().await });
 
     let tx_handle = tx.clone();
 
@@ -163,8 +225,29 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         let priority = vrrp_pkt.priority;
         let src_addr = vrrp_pkt.ip_src.clone();
 
-        match vrrp_pkt.verify_checksum() {
+        match vrrp_pkt.verify() {
             Ok(_) => {
+                /* additional packet validation using local VRouter config */
+                if vrrp_pkt.router_id != config.router_id {
+                    debug!(
+                        "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
+                        vrrp_pkt.router_id,
+                        config.router_id
+                    );
+                    continue;
+                }
+
+                // TODO: verify virtual ip addresses
+                // Mismatching VIP addresses -> drop the packet, log warning unless the priority is 255
+                if vrrp_pkt.advert_int != config.advert_int {
+                    debug!(
+                        "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
+                        vrrp_pkt.advert_int,
+                        config.advert_int
+                    );
+                    continue;
+                }
+
                 match tx.blocking_send(Event::AdvertReceived(
                     router_id,
                     priority,
@@ -181,48 +264,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             }
         }
     });
-
-    // loop {
-    //     let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-    //         Ok(pkt) => pkt,
-    //         Err(err) => {
-    //             error!("{}", err.to_string());
-    //             continue;
-    //         }
-    //     };
-
-    //     let router_id = vrrp_pkt.router_id;
-    //     let priority = vrrp_pkt.priority;
-    //     let src_addr = vrrp_pkt.ip_src.clone();
-
-    //     debug!(
-    //         "{} - {} - {}",
-    //         router_id,
-    //         priority,
-    //         Ipv4Addr::from(src_addr)
-    //     );
-
-    //     match vrrp_pkt.verify_checksum() {
-    //         Ok(_) => {
-    //             match tx
-    //                 .send(Event::AdvertReceived(
-    //                     router_id,
-    //                     priority,
-    //                     Ipv4Addr::from(src_addr),
-    //                 ))
-    //                 .await
-    //             {
-    //                 Ok(()) => {}
-    //                 Err(err) => {
-    //                     error!("Failed to send event: {}", err.to_string());
-    //                 }
-    //             }
-    //         }
-    //         Err(err) => {
-    //             warn!("Invalid VRRP packet received: {}", err);
-    //         }
-    //     }
-    // }
 
     loop {
         match shutdown_rx.recv().await {
@@ -277,7 +318,7 @@ pub fn start_vrrp_listener(if_name: String) {
             router_id, priority, src_addr[0], src_addr[1], src_addr[2], src_addr[3]
         );
 
-        match vrrp_pkt.verify_checksum() {
+        match vrrp_pkt.verify() {
             Ok(_) => {
                 vrrp_pkt.print();
             }
@@ -286,17 +327,4 @@ pub fn start_vrrp_listener(if_name: String) {
             }
         }
     }
-}
-
-pub fn debugger(if_name: &str) {
-    info!("{}", if_name);
-    _ = get_ip_address(if_name);
-    _ = get_mac_address(if_name);
-    let sock_fd = open_arp_socket(if_name).unwrap();
-    _ = send_gratuitous_arp(
-        sock_fd.as_raw_fd(),
-        if_name.to_string(),
-        50,
-        (Ipv4Addr::new(192, 168, 35, 200), 24),
-    );
 }
