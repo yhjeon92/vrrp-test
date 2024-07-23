@@ -14,8 +14,8 @@ use nix::{
 
 use crate::{
     constants::{
-        AF_INET, IFA_ADDRESS, IFA_LABEL, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING,
-        IFR_FLAG_UP, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
+        AF_INET, IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
+        NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
         RT_SCOPE_UNIVERSE,
     },
     packet::{IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader},
@@ -259,17 +259,6 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
         .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
-    // TODO
-    let if_label = format!("{}:1", if_name);
-
-    payload_bytes.append(
-        &mut NetLinkAttributeHeader::new(
-            (size_of::<NetLinkAttributeHeader>() + if_label.len() + 1) as u16,
-            IFA_LABEL,
-        )
-        .to_bytes(&mut Vec::from(if_label.as_bytes())),
-    );
-
     payload_bytes.append(
         &mut NetLinkAttributeHeader::new(
             (size_of::<NetLinkAttributeHeader>() + 4) as u16,
@@ -372,16 +361,6 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             IFA_LOCAL,
         )
         .to_bytes(&mut Vec::from(address.address.octets())),
-    );
-
-    let if_label = format!("{}:1", if_name);
-
-    payload_bytes.append(
-        &mut NetLinkAttributeHeader::new(
-            (size_of::<NetLinkAttributeHeader>() + if_label.len() + 1) as u16,
-            IFA_LABEL,
-        )
-        .to_bytes(&mut Vec::from(if_label.as_bytes())),
     );
 
     payload_bytes.append(

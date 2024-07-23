@@ -57,7 +57,7 @@ pub const NLATTR_ALIGNTO: u16 = 4;
 
 pub const IFA_ADDRESS: u16 = 1;
 pub const IFA_LOCAL: u16 = 2;
-pub const IFA_LABEL: u16 = 3;
+pub const _IFA_LABEL: u16 = 3;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 

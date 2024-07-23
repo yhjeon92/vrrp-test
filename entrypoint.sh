@@ -25,7 +25,7 @@ if [[ -z "${VRRP_NETMASK_LEN}" ]]; then
 fi
 
 if [ ! -f ./vrrp.toml ]; then
-  printf "interface = \"$VRRP_IF\"\nrouter_id = $VRRP_RID\npriority = $VRRP_PRIORITY\nadvert_int = $VRRP_ADVERT_INT\nvirtual_ip = \"$VRRP_VIP\"\nnetmask_len = $VRRP_NETMASK_LEN" >> ./vrrp.toml
+  printf "interface = \"$VRRP_IF\"\nrouter_id = $VRRP_RID\npriority = $VRRP_PRIORITY\nadvert_int = $VRRP_ADVERT_INT\nvip_addresses = [ \"$VRRP_VIP/$VRRP_NETMASK_LEN\" ]" >> ./vrrp.toml
 fi
 
 if [[ -z "${VERBOSE}" ]]; then
