@@ -17,7 +17,7 @@ mod packet;
 mod router;
 mod socket;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
     pub address: Ipv4Addr,
     pub netmask: u8,
@@ -69,7 +69,7 @@ impl<'de> serde::de::Deserialize<'de> for Ipv4WithNetmask {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VRouterConfig {
     pub interface: String,
     pub router_id: u8,
@@ -252,6 +252,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                     router_id,
                     priority,
                     Ipv4Addr::from(src_addr),
+                    vrrp_pkt.vip_addresses,
                 )) {
                     Ok(()) => {}
                     Err(err) => {
@@ -312,11 +313,18 @@ pub fn start_vrrp_listener(if_name: String) {
         let router_id = vrrp_pkt.router_id;
         let priority = vrrp_pkt.priority;
         let src_addr = vrrp_pkt.ip_src.clone();
+        let vip_addresses = vrrp_pkt
+            .vip_addresses
+            .iter()
+            .map(|address| format!("{} ", address.to_string()))
+            .collect::<String>();
 
         info!(
             "VRRPv2 advertisement received: router id {} - prior {} - src {}.{}.{}.{}",
             router_id, priority, src_addr[0], src_addr[1], src_addr[2], src_addr[3]
         );
+
+        info!("Virtual IPs: {}", vip_addresses);
 
         match vrrp_pkt.verify() {
             Ok(_) => {

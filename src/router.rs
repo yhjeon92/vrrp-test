@@ -1,5 +1,6 @@
 use core::fmt;
 use std::{
+    collections::HashSet,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
     time::Duration,
@@ -35,21 +36,24 @@ pub enum Event {
     Startup,
     ShutDown,
     MasterDown,
-    // RouterId - Priority - Source
-    AdvertReceived(u8, u8, Ipv4Addr),
+    // RouterId - Priority - Source - VIPs
+    AdvertReceived(u8, u8, Ipv4Addr, Vec<Ipv4Addr>),
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             Event::Startup => write!(f, "StartUp"),
             Event::MasterDown => write!(f, "MasterDown"),
-            Event::AdvertReceived(rid, prior, src_addr) => write!(
+            Event::AdvertReceived(rid, prior, src_addr, vips) => write!(
                 f,
-                "AdvertReceived rid {} prio {} addr {}",
+                "AdvertReceived rid {} prio {} addr {} vips {}",
                 rid,
                 prior,
-                src_addr.to_string()
+                src_addr.to_string(),
+                vips.iter()
+                    .map(|addr| format!("{} ", addr.to_string()))
+                    .collect::<String>()
             ),
             Event::ShutDown => write!(f, "ShutDown"),
         }
@@ -159,6 +163,12 @@ impl Router {
         let mut master_timer_tx: Option<Sender<TimerEvent>> = None;
         let mut advert_timer_tx: Option<Sender<TimerEvent>> = None;
 
+        let configured_vips = self
+            .vip_addresses
+            .iter()
+            .map(|address_netmask| address_netmask.address)
+            .collect::<HashSet<_>>();
+
         // main router loop
         loop {
             match self.router_rx.recv().await {
@@ -244,116 +254,136 @@ impl Router {
                                 _ => (),
                             }
                         }
-                        Event::AdvertReceived(router_id, priority, src_addr) => match self.state {
-                            State::Backup => {
-                                debug!(
-                                    "\tAdvert router id {} - priority {} - src {}",
-                                    router_id,
-                                    priority,
-                                    src_addr.to_string()
-                                );
+                        Event::AdvertReceived(router_id, priority, src_addr, vip_addresses) => {
+                            match self.state {
+                                State::Backup => {
+                                    debug!(
+                                        "\tAdvert router id {} - priority {} - src {}",
+                                        router_id,
+                                        priority,
+                                        src_addr.to_string()
+                                    );
 
-                                if router_id == self.router_id {
-                                    if priority == 0 {
-                                        /* MASTER stopped participating in VRRP */
-                                        // Reset master down timer to skew_time
-                                        warn!("VRRPv2 advert of priority 0 received.");
-                                        match master_timer_tx {
-                                            Some(ref tx) => {
-                                                _ = tx
-                                                    .send(TimerEvent::ResetInterval(self.skew_time))
-                                                    .await
-                                            }
-                                            None => {
-                                                error!("cannot find master down timer binding, exiting..");
-                                                return;
-                                            }
-                                        };
-                                    } else {
-                                        if !self.preempt_mode || priority >= self.priority {
-                                            // Master healthy. Resetting master down timer
+                                    if router_id == self.router_id {
+                                        if priority == 0 {
+                                            /* MASTER stopped participating in VRRP */
+                                            // Reset master down timer to skew_time
+                                            warn!("VRRPv2 advert of priority 0 received.");
                                             match master_timer_tx {
                                                 Some(ref tx) => {
-                                                    _ = tx.send(TimerEvent::ResetTimer).await
+                                                    _ = tx
+                                                        .send(TimerEvent::ResetInterval(
+                                                            self.skew_time,
+                                                        ))
+                                                        .await
                                                 }
                                                 None => {
                                                     error!("cannot find master down timer binding, exiting..");
                                                     return;
                                                 }
+                                            };
+                                        } else {
+                                            if !self.preempt_mode || priority >= self.priority {
+                                                if !vip_addresses
+                                                    .into_iter()
+                                                    .collect::<HashSet<_>>()
+                                                    .eq(&configured_vips)
+                                                {
+                                                    warn!("Virtual IPs in received advert does not match with local configuration");
+                                                } else {
+                                                    // Master healthy. Resetting master down timer
+                                                    match master_timer_tx {
+                                                        Some(ref tx) => {
+                                                            _ = tx
+                                                                .send(TimerEvent::ResetTimer)
+                                                                .await
+                                                        }
+                                                        None => {
+                                                            error!("cannot find master down timer binding, exiting..");
+                                                            return;
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            State::Master => {
-                                if router_id == self.router_id {
-                                    if priority == 0 {
-                                        // Send VRRPv2 advertisement
-                                        match send_advertisement(
-                                            self.sock_fd.as_raw_fd(),
-                                            advert_pkt.clone(),
-                                        ) {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                warn!("Failed to send VRRP advertisement: {}", err);
-                                            }
-                                        }
-                                        // Set advert timer to advert_int
-                                        match advert_timer_tx {
-                                            Some(ref tx) => {
-                                                _ = tx
-                                                    .send(TimerEvent::ResetInterval(
-                                                        self.advert_int as f32,
-                                                    ))
-                                                    .await;
-                                            }
-                                            None => { /* */ }
-                                        }
-                                        // Received an Advert with higher priority - demoting to BACKUP
-                                    } else if (!self.preempt_mode || priority > self.priority)
-                                        || (priority == self.priority && src_addr > self.local_addr)
-                                    {
-                                        for virtual_ip in self.vip_addresses.iter() {
-                                            // Delete virtual ip bound to interface
-                                            match del_ip_address(&self.if_name, virtual_ip) {
+                                State::Master => {
+                                    if router_id == self.router_id {
+                                        if priority == 0 {
+                                            // Send VRRPv2 advertisement
+                                            match send_advertisement(
+                                                self.sock_fd.as_raw_fd(),
+                                                advert_pkt.clone(),
+                                            ) {
                                                 Ok(_) => {}
                                                 Err(err) => {
-                                                    error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
-                                                    error!("exiting..");
-                                                    return;
+                                                    warn!(
+                                                        "Failed to send VRRP advertisement: {}",
+                                                        err
+                                                    );
                                                 }
                                             }
-                                        }
-                                        // Stop advert timer
-                                        match advert_timer_tx {
-                                            Some(ref tx) => {
-                                                _ = tx.send(TimerEvent::Abort).await;
+                                            // Set advert timer to advert_int
+                                            match advert_timer_tx {
+                                                Some(ref tx) => {
+                                                    _ = tx
+                                                        .send(TimerEvent::ResetInterval(
+                                                            self.advert_int as f32,
+                                                        ))
+                                                        .await;
+                                                }
+                                                None => { /* */ }
                                             }
-                                            None => {
-                                                warn!("Failed to find bindings for advert timer!");
+                                            // Received an Advert with higher priority - demoting to BACKUP
+                                        } else if (!self.preempt_mode || priority > self.priority)
+                                            || (priority == self.priority
+                                                && src_addr > self.local_addr)
+                                        {
+                                            for virtual_ip in self.vip_addresses.iter() {
+                                                // Delete virtual ip bound to interface
+                                                match del_ip_address(&self.if_name, virtual_ip) {
+                                                    Ok(_) => {}
+                                                    Err(err) => {
+                                                        error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
+                                                        error!("exiting..");
+                                                        return;
+                                                    }
+                                                }
                                             }
-                                        };
+                                            // Stop advert timer
+                                            match advert_timer_tx {
+                                                Some(ref tx) => {
+                                                    _ = tx.send(TimerEvent::Abort).await;
+                                                }
+                                                None => {
+                                                    warn!(
+                                                        "Failed to find bindings for advert timer!"
+                                                    );
+                                                }
+                                            };
 
-                                        advert_timer_tx = None;
+                                            advert_timer_tx = None;
 
-                                        // Transition to Backup
-                                        info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}",
+                                            // Transition to Backup
+                                            info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}",
                                             src_addr.to_string(),
                                             priority,
                                             self.priority);
 
-                                        // Start master down timer
-                                        master_timer_tx = Some(start_master_down_timer(
-                                            self.master_down_int,
-                                            self.router_tx.clone(),
-                                        ));
-                                        info!("Demoting to BACKUP state..");
-                                        self.state = State::Backup;
+                                            // Start master down timer
+                                            master_timer_tx = Some(start_master_down_timer(
+                                                self.master_down_int,
+                                                self.router_tx.clone(),
+                                            ));
+                                            info!("Demoting to BACKUP state..");
+                                            self.state = State::Backup;
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        },
+                        }
                         Event::MasterDown => match self.state {
                             State::Backup => {
                                 warn!("Master down interval expired.");
