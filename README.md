@@ -14,6 +14,8 @@ $ cargo build --release
 
 #### Run
 
+- The compiled binary requires two Linux system capabilities to function - `CAP_NET_RAW` and `CAP_NET_ADMIN`.
+
 ```shell
 # Run in read-only mode (Receives VRRPv2 packet on the given interface and print it)
 $ sudo vrrp-test -i $TARGET_INTERFACE

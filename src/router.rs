@@ -131,7 +131,6 @@ impl Router {
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             preempt_mode: true,
-            // TODO: multiple VIPs
             vip_addresses: config.vip_addresses,
             // TODO
             auth_data: [49, 49, 49, 49, 0, 0, 0, 0].to_vec(),
@@ -586,7 +585,6 @@ async fn advert_timer(
 }
 
 fn start_master_down_timer(interval: f32, router_tx: Sender<Event>) -> Sender<TimerEvent> {
-    // let (tx, rx) = channel::<TimerEvent>(size_of::<TimerEvent>());
     let (tx, rx) = channel::<TimerEvent>(1);
     tokio::task::spawn(async move { master_down_timer(interval, router_tx, rx).await });
 

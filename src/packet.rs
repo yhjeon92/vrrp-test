@@ -1,11 +1,10 @@
 use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 
 use log::{debug, error};
-use serde::Deserialize;
 
 use crate::constants::{
     BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
-    NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
+    NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
 };
 
 // Size 8
@@ -182,8 +181,8 @@ pub struct GarpPacket {
 
     hw_type: u16,
     proto_type: u16,
-    hw_len: u8,    // 6?
-    proto_len: u8, // 4?
+    hw_len: u8,    /* 6 for MAC */
+    proto_len: u8, /* 4 for IPv4 */
     op_code: u16,
     hw_addr_src: [u8; 6],
     proto_addr_src: [u8; 4],
@@ -232,7 +231,7 @@ impl GarpPacket {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct VrrpV2Packet {
     // IPv4 Header Fields
     _ip_ver: u8,
@@ -256,9 +255,7 @@ pub struct VrrpV2Packet {
     pub advert_int: u8,
     pub checksum: u16,
 
-    #[serde(skip_deserializing)]
     pub vip_addresses: Vec<Ipv4Addr>,
-    #[serde(skip_deserializing)]
     pub auth_data: Vec<u8>,
 }
 
@@ -294,12 +291,52 @@ impl VrrpV2Packet {
         }
     }
 
-    pub fn set_vip_addresses(&mut self, addresses: &Vec<Ipv4Addr>) {
-        self.vip_addresses = addresses.clone();
-    }
+    pub fn from_slice(buf: &[u8]) -> Option<VrrpV2Packet> {
+        if buf.len() < VRRP_HDR_LEN {
+            None
+        } else {
+            let cnt_ip_addr = buf[23];
+            if buf.len() < VRRP_HDR_LEN + (4 * cnt_ip_addr as usize) {
+                None
+            } else {
+                let mut pkt = VrrpV2Packet {
+                    _ip_ver: buf[0],
+                    _ip_dscp: buf[1],
+                    _ip_length: u16::from_be_bytes(buf[2..4].try_into().unwrap()),
+                    _ip_id: u16::from_be_bytes(buf[4..6].try_into().unwrap()),
+                    _ip_flags: u16::from_be_bytes(buf[6..8].try_into().unwrap()),
+                    ip_ttl: buf[8],
+                    _ip_proto: buf[9],
+                    _ip_checksum: u16::from_be_bytes(buf[10..12].try_into().unwrap()),
+                    ip_src: buf[12..16].try_into().unwrap(),
+                    _ip_dst: buf[16..20].try_into().unwrap(),
+                    ver_type: buf[20],
+                    router_id: buf[21],
+                    priority: buf[22],
+                    cnt_ip_addr,
+                    auth_type: buf[24],
+                    advert_int: buf[25],
+                    checksum: u16::from_be_bytes(buf[26..28].try_into().unwrap()),
+                    vip_addresses: Vec::new(),
+                    auth_data: Vec::new(),
+                };
 
-    pub fn set_auth_data(&mut self, auth_data: &Vec<u8>) {
-        self.auth_data = auth_data.clone();
+                for ind in 0..cnt_ip_addr {
+                    pkt.vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
+                        buf[VRRP_HDR_LEN + (ind * 4) as usize
+                            ..VRRP_HDR_LEN + 4 + (ind * 4) as usize]
+                            .try_into()
+                            .unwrap(),
+                    )));
+                }
+
+                for ind in VRRP_HDR_LEN + (4 * cnt_ip_addr as usize)..buf.len() {
+                    pkt.auth_data.push(buf[ind]);
+                }
+
+                Some(pkt)
+            }
+        }
     }
 
     pub fn print(&self) {

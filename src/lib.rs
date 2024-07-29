@@ -237,8 +237,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                     continue;
                 }
 
-                // TODO: verify virtual ip addresses
-                // Mismatching VIP addresses -> drop the packet, log warning unless the priority is 255
                 if vrrp_pkt.advert_int != config.advert_int {
                     debug!(
                         "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",

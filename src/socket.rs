@@ -1,5 +1,4 @@
 use std::{
-    convert::TryInto,
     ffi::OsString,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -8,13 +7,12 @@ use std::{
 use crate::{
     constants::{
         AF_INET, AF_PACKET, BROADCAST_MAC_SOCKADDR_LL, ETH_PROTO_ARP, IPPROTO_IP, IPPROTO_VRRPV2,
-        SOCKET_TTL, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_RAW, VRRP_HDR_LEN, VRRP_MCAST_ADDR,
+        SOCKET_TTL, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     interface::{get_if_index, get_mac_address, set_if_multicast_flag},
     packet::{GarpPacket, VrrpV2Packet},
     Ipv4WithNetmask,
 };
-use bincode::Options;
 use log::debug;
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
@@ -305,14 +303,6 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
         }
     };
 
-    // Default bincode::deserialize does not support big endian with fixint
-    let mut vrrp_pkt: VrrpV2Packet = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_big_endian()
-        .deserialize(&pkt_buf[0..VRRP_HDR_LEN])
-        .unwrap();
-
     debug!("VRRPv2 socket received a packet:");
     debug!(
         "{}",
@@ -322,22 +312,12 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
             .collect::<String>()
     );
 
-    let mut vip_addresses: Vec<Ipv4Addr> = Vec::new();
-
-    for ind in 0..vrrp_pkt.cnt_ip_addr {
-        vip_addresses.push(Ipv4Addr::from(u32::from_be_bytes(
-            pkt_buf[VRRP_HDR_LEN + (ind * 4) as usize..VRRP_HDR_LEN + 4 + (ind * 4) as usize]
-                .try_into()
-                .unwrap(),
-        )));
-    }
-
-    vrrp_pkt.set_vip_addresses(&vip_addresses);
-
-    let auth_data =
-        pkt_buf[VRRP_HDR_LEN + (vrrp_pkt.cnt_ip_addr * 4) as usize..len as usize].to_vec();
-
-    vrrp_pkt.set_auth_data(&auth_data);
+    let vrrp_pkt = match VrrpV2Packet::from_slice(&pkt_buf[0..len]) {
+        Some(pkt) => pkt,
+        None => {
+            return Err("failed to deserialize VRRPv2 advert packet".to_string());
+        }
+    };
 
     return Ok(vrrp_pkt);
 }
