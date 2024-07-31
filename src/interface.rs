@@ -181,7 +181,7 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
         let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCGIFHWADDR, &mut if_opts);
         if res < 0 {
             return Err(format!(
-                "Failed to get primary IPv4 address of interface {}: {}",
+                "Failed to query Hardware address for interface {}: {}",
                 if_name,
                 std::io::Error::last_os_error().to_string(),
             ));

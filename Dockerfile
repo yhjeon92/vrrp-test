@@ -1,6 +1,6 @@
 FROM rust:1-slim-bookworm AS builder
 
-RUN apt-get update && apt-get install -y build-essential pkg-config libssl-dev
+RUN apt-get update && apt-get install -y build-essential pkg-config libssl-dev arping
 
 COPY . /app
 

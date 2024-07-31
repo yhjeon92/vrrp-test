@@ -14,20 +14,29 @@ $ cargo build --release
 
 #### Run
 
-- The compiled binary requires two Linux system capabilities to function - `CAP_NET_RAW` and `CAP_NET_ADMIN`.
+- The compiled binary requires two Linux system capabilities to function - `CAP_NET_RAW` and `CAP_NET_ADMIN`. You can simply run it with `sudo` command, or manually set the capabilities using `setcap` system command.
 
 ```shell
-# Run in read-only mode (Receives VRRPv2 packet on the given interface and print it)
-$ sudo vrrp-test -i $TARGET_INTERFACE
-
-# Run in router mode (Send VRRPv2 advertisement packet periodically)
-$ sudo vrrp-test -r
+$ setcap cap_net_admin,cap_net_raw=+ep target/debug/vrrp-test
+$ setcap cap_net_admin,cap_net_raw=+ep target/release/vrrp-test
 ```
 
-- Specify configuration file path with command line option -c
+- Below example runs a read-only application, which listens to the given network interface and prints received VRRPv2 advert packet.
 
 ```shell
-$ sudo vrrp-test -r -c $CONFIG_FILE_PATH
+$ vrrp-test -i $NETWORK_INTERFACE
+```
+
+- Below example runs a virtual router, which participates in cluster on the network interface and tries to occupy virtual ip if no master node exists. Application refers to `vrrp.toml` in working directory as configuration file by default.
+
+```shell
+$ vrrp-test -r
+```
+
+- Configuration file path can be customized with command line argument option `-c`.
+
+```shell
+$ vrrp-test -r -c $CONFIG_FILE_PATH
 ```
 
 #### Configuration
@@ -48,7 +57,7 @@ vip_addresses = [ "192.168.35.200/24" ]
 - `advert_int` is the interval to multicast VRRPv2 advertisement. Unit is second.
 - `vip_addresses` is the TOML array of IPv4 address (with netmask length) of virtual IPs you'd like to assign to the virtual router.
 
-#### Testing with Docker compose
+#### Running with Docker compose
 
 - Build Docker image
 
