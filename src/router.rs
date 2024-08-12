@@ -125,7 +125,7 @@ impl Router {
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
-            // TODO
+            // TODO: backward compatibility
             auth_type: 1,
             master_down_int: (3 as f32 * config.advert_int as f32)
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
@@ -133,7 +133,7 @@ impl Router {
             preempt_mode: true,
             vip_addresses: config.vip_addresses,
             // TODO
-            auth_data: [49, 49, 49, 49, 0, 0, 0, 0].to_vec(),
+            auth_data: [].to_vec(),
             router_tx: tx,
             router_rx: rx,
         })
