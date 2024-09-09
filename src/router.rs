@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
+    process::Command,
     time::Duration,
 };
 
@@ -93,6 +94,8 @@ pub struct Router {
     master_down_int: f32,
     skew_time: f32,
     preempt_mode: bool,
+    pre_promote_script: Option<String>,
+    pre_demote_script: Option<String>,
     vip_addresses: Vec<Ipv4WithNetmask>,
     auth_data: Vec<u8>,
     router_tx: Sender<Event>,
@@ -131,6 +134,8 @@ impl Router {
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             preempt_mode: true,
+            pre_promote_script: config.pre_promote_script,
+            pre_demote_script: config.pre_demote_script,
             vip_addresses: config.vip_addresses,
             // TODO
             auth_data: [].to_vec(),
@@ -179,7 +184,11 @@ impl Router {
                             match self.state {
                                 State::Initialize => {
                                     // Do things..
+                                    // Priority 255 -> preempting MASTER state
                                     if self.priority == 0xFF {
+                                        // Promote oneself to Master
+                                        info!("Promoting to MASTER state..");
+
                                         // Multicast Advertisement
                                         match send_advertisement(
                                             self.sock_fd.as_raw_fd(),
@@ -189,6 +198,13 @@ impl Router {
                                             Err(err) => {
                                                 warn!("Failed to send VRRP advertisement: {}", err);
                                             }
+                                        }
+
+                                        match &self.pre_promote_script {
+                                            Some(command) => {
+                                                _ = execute_command(command.to_owned());
+                                            }
+                                            None => {}
                                         }
 
                                         for virtual_ip in self.vip_addresses.iter() {
@@ -235,18 +251,17 @@ impl Router {
                                             None => { /*  */ }
                                         };
 
-                                        // Promote oneself to Master
-                                        info!("Promoting to MASTER state..");
                                         self.state = State::Master;
                                     } else {
+                                        // Promote oneself to BACKUP
+                                        info!("Promoting to BACKUP state..");
+
                                         // Start master down timer
                                         master_timer_tx = Some(start_master_down_timer(
                                             self.master_down_int,
                                             self.router_tx.clone(),
                                         ));
 
-                                        // Promote oneself to BACKUP
-                                        info!("Promoting to BACKUP state..");
                                         self.state = State::Backup;
                                     }
                                 }
@@ -288,7 +303,7 @@ impl Router {
                                                     .collect::<HashSet<_>>()
                                                     .eq(&configured_vips)
                                                 {
-                                                    warn!("Virtual IPs in received advert does not match with local configuration");
+                                                    warn!("Virtual IPs in received advert from {} does not match with local configuration", src_addr);
                                                 } else {
                                                     // Master healthy. Resetting master down timer
                                                     match master_timer_tx {
@@ -339,6 +354,33 @@ impl Router {
                                             || (priority == self.priority
                                                 && src_addr > self.local_addr)
                                         {
+                                            // Transition to Backup
+                                            info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}",
+                                                src_addr.to_string(),
+                                                priority,
+                                                self.priority);
+
+                                            info!("Demoting to BACKUP state..");
+
+                                            // Stop advert timer
+                                            match advert_timer_tx {
+                                                Some(ref tx) => {
+                                                    _ = tx.send(TimerEvent::Abort).await
+                                                }
+                                                None => {
+                                                    warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                                }
+                                            };
+
+                                            advert_timer_tx = None;
+
+                                            match &self.pre_demote_script {
+                                                Some(command) => {
+                                                    _ = execute_command(command.to_owned());
+                                                }
+                                                None => {}
+                                            }
+
                                             for virtual_ip in self.vip_addresses.iter() {
                                                 // Delete virtual ip bound to interface
                                                 match del_ip_address(&self.if_name, virtual_ip) {
@@ -350,32 +392,13 @@ impl Router {
                                                     }
                                                 }
                                             }
-                                            // Stop advert timer
-                                            match advert_timer_tx {
-                                                Some(ref tx) => {
-                                                    _ = tx.send(TimerEvent::Abort).await;
-                                                }
-                                                None => {
-                                                    warn!(
-                                                        "Failed to find bindings for advert timer!"
-                                                    );
-                                                }
-                                            };
-
-                                            advert_timer_tx = None;
-
-                                            // Transition to Backup
-                                            info!("Received VRRP advert from src {} with priority {}, higher than priority of local node {}",
-                                            src_addr.to_string(),
-                                            priority,
-                                            self.priority);
 
                                             // Start master down timer
                                             master_timer_tx = Some(start_master_down_timer(
                                                 self.master_down_int,
                                                 self.router_tx.clone(),
                                             ));
-                                            info!("Demoting to BACKUP state..");
+
                                             self.state = State::Backup;
                                         }
                                     }
@@ -386,6 +409,7 @@ impl Router {
                         Event::MasterDown => match self.state {
                             State::Backup => {
                                 warn!("Master down interval expired.");
+                                info!("Promoting to MASTER state..");
 
                                 // Multicast Advertisement
                                 match send_advertisement(
@@ -396,6 +420,13 @@ impl Router {
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
                                     }
+                                }
+
+                                match &self.pre_promote_script {
+                                    Some(command) => {
+                                        _ = execute_command(command.to_owned());
+                                    }
+                                    None => {}
                                 }
 
                                 for virtual_ip in self.vip_addresses.iter() {
@@ -446,7 +477,6 @@ impl Router {
                                     }
                                 };
 
-                                info!("Promoting to MASTER state..");
                                 self.state = State::Master;
                             }
                             _ => {
@@ -456,6 +486,9 @@ impl Router {
                         Event::ShutDown => match self.state {
                             State::Backup => {
                                 /* Shutting down BACKUP */
+                                // Demote to initialize state
+                                info!("Demoting to INITIALIZE state..");
+
                                 // Stop master down timer
                                 match master_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
@@ -464,12 +497,13 @@ impl Router {
                                     }
                                 };
 
-                                // Demote to initialize state
-                                info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
                             }
                             State::Master => {
                                 /* Shutting down MASTER */
+                                // Demote to initialize state
+                                info!("Demoting to INITIALIZE state..");
+
                                 // Stop advert timer
                                 match advert_timer_tx {
                                     Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
@@ -477,6 +511,13 @@ impl Router {
                                         warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
                                     }
                                 };
+
+                                match &self.pre_demote_script {
+                                    Some(command) => {
+                                        _ = execute_command(command.to_owned());
+                                    }
+                                    None => {}
+                                }
 
                                 for virtual_ip in self.vip_addresses.iter() {
                                     // Delete virtual ip bound to interface
@@ -511,8 +552,6 @@ impl Router {
                                     }
                                 }
 
-                                // Demote to initialize state
-                                info!("Demoting to INITIALIZE state..");
                                 self.state = State::Initialize;
                             }
                             State::Initialize => {
@@ -621,5 +660,53 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
                 break;
             },
         };
+    }
+}
+
+fn execute_command(command: String) -> Result<(), String> {
+    let mut elements = command.split_whitespace();
+
+    match elements.next() {
+        Some(program) => {
+            let mut cmd = Command::new(program);
+            elements.by_ref().for_each(|arg| {
+                cmd.arg(arg);
+            });
+
+            match cmd.output() {
+                Ok(output) => {
+                    match output.status.code().unwrap() {
+                        0 => {
+                            info!(
+                                "Command {} returned {} with status code 0",
+                                command,
+                                String::from_utf8(output.stdout).unwrap().trim_end()
+                            );
+                        }
+                        code => {
+                            warn!(
+                                "Command {} failed with status code {}: {}",
+                                command,
+                                code,
+                                String::from_utf8(output.stderr).unwrap().trim_end()
+                            );
+                        }
+                    }
+
+                    Ok(())
+                }
+                Err(err) => {
+                    warn!("Command {} failed: {}", command, err.to_string());
+                    Err(err.to_string())
+                }
+            }
+        }
+        None => {
+            warn!(
+                "Command {} seems to be empty. Check your configuration.",
+                command
+            );
+            Ok(())
+        }
     }
 }

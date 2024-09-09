@@ -14,6 +14,7 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 COPY --from=builder /app/target/release/vrrp-test /usr/bin/vrrp-test
 COPY --from=builder /app/entrypoint.sh /entrypoint.sh
 
-WORKDIR /etc
+WORKDIR /etc/vrrp
+VOLUME [ "/etc/vrrp" ]
 ENV RUST_LOG=info
 ENTRYPOINT [ "/entrypoint.sh" ]

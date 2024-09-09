@@ -76,6 +76,8 @@ pub struct VRouterConfig {
     pub priority: u8,
     pub advert_int: u8,
     pub vip_addresses: Vec<Ipv4WithNetmask>,
+    pub pre_promote_script: Option<String>,
+    pub pre_demote_script: Option<String>,
 }
 
 impl VRouterConfig {
@@ -123,6 +125,21 @@ impl VRouterConfig {
                 info!("\tRouter ID       {}", config.router_id);
                 info!("\tPriority        {}", config.priority);
                 info!("\tAdvert Interval {}s", config.advert_int);
+
+                match config.pre_promote_script {
+                    Some(ref script) => {
+                        info!("\tPre-promotion script       {}", script);
+                    }
+                    _ => {}
+                }
+
+                match config.pre_demote_script {
+                    Some(ref script) => {
+                        info!("\tPre-demotion script       {}", script);
+                    }
+                    _ => {}
+                }
+
                 info!("\tVIP addresses");
 
                 for virtual_ip in config.vip_addresses.iter() {
