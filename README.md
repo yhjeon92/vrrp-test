@@ -43,19 +43,27 @@ $ vrrp-test -r -c $CONFIG_FILE_PATH
 
 - Copy the sample `vrrp.toml.sample` in repository, adjust the items to suit your need. Default configuration path is set to `vrrp.toml` in working directory.
 
+| Parameter Name | Type | Optional | Description |
+| --- | --- | --- | --- |
+| interface | String |  | Name of network interface to run virtual router on. |
+| router_id | Integer |  | Virtual router Id. The value is used to distinguish Virtual Router clusters in a network. |
+| priority | Integer |  | Priority assigned to this virtual router instance. |
+| advert_int | Integer |  | Interval to multicast VRRP advertisement. Unit is in second. |
+| vip_addresses | String Array |  | TOML Array of IPv4 address with netmask length of virtual IPv4 addresses you'd like to assign to this virtual router instance. |
+| pre_promote_script | String | Optional | OS command to execute prior to BACKUP -> MASTER promotion. |
+| pre_demote_script | String | Optional | OS command to execute prior to MASTER -> BACKUP demotion. |
+
+##### Example
+
 ```toml
 interface = "eth0"
 router_id = 50
 priority = 100
 advert_int = 5
 vip_addresses = [ "192.168.35.200/24" ]
+pre_promote_script = "sh -C /path/to/custom_script.sh"
+pre_demote_script = "/usr/bin/echo >> test.log"
 ```
-
-- `interface` is the name of network interface to run virutal router on.
-- `router_id` is the virtual router Id.
-- `priority` is the priority assigned to virtual router.
-- `advert_int` is the interval to multicast VRRPv2 advertisement. Unit is second.
-- `vip_addresses` is the TOML array of IPv4 address (with netmask length) of virtual IPs you'd like to assign to the virtual router.
 
 #### Running with Docker compose
 
