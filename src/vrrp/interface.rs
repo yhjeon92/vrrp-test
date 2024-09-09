@@ -12,7 +12,7 @@ use nix::{
     sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr},
 };
 
-use crate::{
+use crate::vrrp::{
     constants::{
         AF_INET, IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
         NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,

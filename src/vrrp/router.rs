@@ -10,7 +10,7 @@ use std::{
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-use crate::{
+use crate::vrrp::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
     socket::{send_advertisement, send_gratuitous_arp},

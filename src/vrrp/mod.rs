@@ -1,3 +1,9 @@
+mod constants;
+mod interface;
+mod packet;
+mod router;
+mod socket;
+
 use core::fmt;
 use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
 
@@ -10,12 +16,6 @@ use serde::{
 };
 use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
 use tokio::sync::mpsc::{self, Receiver};
-
-mod constants;
-mod interface;
-mod packet;
-mod router;
-mod socket;
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {

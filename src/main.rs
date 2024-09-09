@@ -1,8 +1,10 @@
+pub mod vrrp;
+
 use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp_test::{start_vrouter_cfile, start_vrrp_listener};
+use vrrp::{start_vrouter_cfile, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

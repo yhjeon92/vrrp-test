@@ -4,7 +4,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
 
-use crate::{
+use crate::vrrp::{
     constants::{
         AF_INET, AF_PACKET, BROADCAST_MAC_SOCKADDR_LL, ETH_PROTO_ARP, IPPROTO_IP, IPPROTO_VRRPV2,
         SOCKET_TTL, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_RAW, VRRP_MCAST_ADDR,

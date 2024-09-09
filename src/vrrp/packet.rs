@@ -2,7 +2,7 @@ use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 
 use log::{debug, error};
 
-use crate::constants::{
+use crate::vrrp::constants::{
     BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
     NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
 };

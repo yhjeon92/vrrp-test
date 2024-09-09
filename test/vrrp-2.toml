@@ -1,0 +1,7 @@
+interface = "eth0"
+router_id = 50
+priority = 98
+advert_int = 1
+pre_promote_script = "sh -C /etc/vrrp/test_promote.sh"
+pre_demote_script = "sh -C /etc/vrrp/test_demote.sh"
+vip_addresses = [ "172.18.0.100/24" ]
