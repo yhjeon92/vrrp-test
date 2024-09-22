@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use crate::vrrp::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
-    socket::{send_advertisement, send_gratuitous_arp},
+    socket::{send_advertisement, send_advertisement_unicast, send_gratuitous_arp},
     Ipv4WithNetmask, VRouterConfig,
 };
 
@@ -96,6 +96,7 @@ pub struct Router {
     preempt_mode: bool,
     pre_promote_script: Option<String>,
     pre_demote_script: Option<String>,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
     vip_addresses: Vec<Ipv4WithNetmask>,
     auth_data: Vec<u8>,
     router_tx: Sender<Event>,
@@ -136,6 +137,7 @@ impl Router {
             preempt_mode: true,
             pre_promote_script: config.pre_promote_script,
             pre_demote_script: config.pre_demote_script,
+            unicast_peers: config.unicast_peers,
             vip_addresses: config.vip_addresses,
             // TODO
             auth_data: [].to_vec(),
@@ -190,7 +192,7 @@ impl Router {
                                         info!("Promoting to MASTER state..");
 
                                         // Multicast Advertisement
-                                        match send_advertisement(
+                                        match self.send_vrrp_advert(
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
                                         ) {
@@ -243,6 +245,7 @@ impl Router {
                                             self.advert_int,
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
+                                            self.unicast_peers.clone(),
                                         ));
 
                                         // Stop master down timer
@@ -326,7 +329,7 @@ impl Router {
                                     if router_id == self.router_id {
                                         if priority == 0 {
                                             // Send VRRPv2 advertisement
-                                            match send_advertisement(
+                                            match self.send_vrrp_advert(
                                                 self.sock_fd.as_raw_fd(),
                                                 advert_pkt.clone(),
                                             ) {
@@ -412,10 +415,9 @@ impl Router {
                                 info!("Promoting to MASTER state..");
 
                                 // Multicast Advertisement
-                                match send_advertisement(
-                                    self.sock_fd.as_raw_fd(),
-                                    advert_pkt.clone(),
-                                ) {
+                                match self
+                                    .send_vrrp_advert(self.sock_fd.as_raw_fd(), advert_pkt.clone())
+                                {
                                     Ok(_) => {}
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
@@ -467,6 +469,7 @@ impl Router {
                                     self.advert_int,
                                     self.sock_fd.as_raw_fd(),
                                     advert_pkt.clone(),
+                                    self.unicast_peers.clone(),
                                 ));
 
                                 // Stop master down timer
@@ -545,7 +548,9 @@ impl Router {
                                     self.auth_data.clone(),
                                 );
 
-                                match send_advertisement(self.sock_fd.as_raw_fd(), elect_pkt) {
+                                match self
+                                    .send_vrrp_advert(self.sock_fd.as_raw_fd(), elect_pkt.clone())
+                                {
                                     Ok(_) => {}
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
@@ -568,11 +573,25 @@ impl Router {
             }
         }
     }
+
+    fn send_vrrp_advert(&mut self, sock_fd: i32, vrrp_pkt: VrrpV2Packet) -> Result<(), String> {
+        match &self.unicast_peers {
+            Some(peers) => return send_advertisement_unicast(sock_fd, vrrp_pkt, peers.clone()),
+            None => return send_advertisement(sock_fd, vrrp_pkt),
+        }
+    }
 }
 
-fn start_advert_timer(advert_int: u8, sock_fd: i32, vrrp_pkt: VrrpV2Packet) -> Sender<TimerEvent> {
+fn start_advert_timer(
+    advert_int: u8,
+    sock_fd: i32,
+    vrrp_pkt: VrrpV2Packet,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
+) -> Sender<TimerEvent> {
     let (tx, rx) = channel::<TimerEvent>(3);
-    tokio::task::spawn(async move { advert_timer(advert_int, sock_fd, vrrp_pkt, rx).await });
+    tokio::task::spawn(async move {
+        advert_timer(advert_int, sock_fd, vrrp_pkt, unicast_peers, rx).await
+    });
 
     tx
 }
@@ -581,6 +600,7 @@ async fn advert_timer(
     interval: u8,
     sock_fd: i32,
     vrrp_pkt: VrrpV2Packet,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
     mut rx: Receiver<TimerEvent>,
 ) {
     let mut timer_int = interval.clone();
@@ -612,10 +632,22 @@ async fn advert_timer(
                 }
             },
             () = &mut sleep => {
-                match send_advertisement(sock_fd, vrrp_pkt.clone()) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!("Failed to send VRRP advertisement: {}", err);
+                match unicast_peers {
+                    Some(ref peers) => {
+                        match send_advertisement_unicast(sock_fd, vrrp_pkt.clone(), peers.clone()) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("Failed to send VRRP advertisement: {}", err);
+                            }
+                        }
+                    },
+                    None => {
+                        match send_advertisement(sock_fd, vrrp_pkt.clone()) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("Failed to send VRRP advertisement: {}", err);
+                            }
+                        }
                     }
                 }
             }

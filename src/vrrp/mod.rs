@@ -78,6 +78,7 @@ pub struct VRouterConfig {
     pub vip_addresses: Vec<Ipv4WithNetmask>,
     pub pre_promote_script: Option<String>,
     pub pre_demote_script: Option<String>,
+    pub unicast_peers: Option<Vec<Ipv4Addr>>,
 }
 
 impl VRouterConfig {
@@ -140,6 +141,16 @@ impl VRouterConfig {
                     _ => {}
                 }
 
+                match config.unicast_peers {
+                    Some(ref peers) => {
+                        info!("\tUnicast peers:");
+                        for peer in peers {
+                            info!("\t\t- {}", peer)
+                        }
+                    }
+                    _ => {}
+                }
+
                 info!("\tVIP addresses");
 
                 for virtual_ip in config.vip_addresses.iter() {
@@ -172,7 +183,13 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
 
 pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
     let if_name = config.interface.clone();
-    let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
+    let vrrp_sock_fd = match open_advertisement_socket(
+        &if_name,
+        match config.unicast_peers {
+            Some(_) => false,
+            None => true,
+        },
+    ) {
         Ok(fd) => fd,
         Err(err) => {
             error!("Failed to open a socket: {}, exiting...", err.to_string());
@@ -303,7 +320,7 @@ pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver
 }
 
 pub fn start_vrrp_listener(if_name: String) {
-    let vrrp_sock_fd = match open_advertisement_socket(&if_name) {
+    let vrrp_sock_fd = match open_advertisement_socket(&if_name, true) {
         Ok(fd) => fd,
         Err(err) => {
             error!("Failed to open a socket: {}, exiting...", err.to_string());
