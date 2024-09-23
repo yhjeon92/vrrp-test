@@ -136,7 +136,7 @@ pub fn get_ip_address(if_name: &str) -> Result<Ipv4Addr, String> {
         if sockaddr.read().sin_family == AF_INET as u16 {
             let ipaddr_converted = Ipv4Addr::from(sockaddr.read().sin_addr.s_addr.to_ne_bytes());
             debug!("{}", ipaddr_converted.to_string());
-            return Ok(Ipv4Addr::from(sockaddr.read().sin_addr.s_addr));
+            return Ok(ipaddr_converted);
         } else {
             return Err(format!(
                 "Wrong sin_family 0x{:04X?} from kernel system call response",

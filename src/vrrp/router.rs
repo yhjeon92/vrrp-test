@@ -155,6 +155,7 @@ impl Router {
             self.priority,
             self.auth_type,
             self.advert_int,
+            self.local_addr,
             Vec::<Ipv4Addr>::from(
                 self.vip_addresses
                     .iter()
@@ -539,6 +540,7 @@ impl Router {
                                     0, /* Priority of 0 indicates Master stopped participating in VRRP */
                                     self.auth_type,
                                     self.advert_int,
+                                    self.local_addr,
                                     Vec::<Ipv4Addr>::from(
                                         self.vip_addresses
                                             .iter()
@@ -605,30 +607,22 @@ async fn advert_timer(
 ) {
     let mut timer_int = interval.clone();
     loop {
-        debug!("starting advertisement timer!");
-
         let sleep = tokio::time::sleep(Duration::from_secs(timer_int as u64));
         tokio::pin!(sleep);
 
         tokio::select! {
-            res = rx.recv() => {
-                match res {
-                    Some(event) => {
-                        match event {
-                            TimerEvent::ResetTimer => {
-                                debug!("resetting master down timer..");
-                            }
-                            TimerEvent::ResetInterval(int) => {
-                                debug!("resetting master down timer interval..");
-                                timer_int = int as u8;
-                            }
-                            TimerEvent::Abort => {
-                                debug!("aborting master down timer..");
-                                break;
-                            }
-                        }
-                    },
-                    None => {},
+            Some(event) = rx.recv() => {
+                match event {
+                    TimerEvent::ResetTimer => {
+                    }
+                    TimerEvent::ResetInterval(int) => {
+                        info!("resetting advertisement timer interval..");
+                        timer_int = int as u8;
+                    }
+                    TimerEvent::Abort => {
+                        info!("aborting advertisement timer..");
+                        break;
+                    }
                 }
             },
             () = &mut sleep => {
@@ -665,8 +659,6 @@ fn start_master_down_timer(interval: f32, router_tx: Sender<Event>) -> Sender<Ti
 async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<TimerEvent>) {
     let mut timer_int = interval.clone();
     loop {
-        debug!("starting master down timer!");
-
         let sleep = tokio::time::sleep(Duration::from_millis((timer_int * 1000 as f32) as u64));
         tokio::pin!(sleep);
 
@@ -674,14 +666,13 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
             Some(event) = rx.recv() => {
                 match event {
                     TimerEvent::ResetTimer => {
-                        debug!("resetting master down timer..");
                     }
                     TimerEvent::ResetInterval(int) => {
-                        debug!("resetting master down timer interval..");
+                        info!("resetting master down timer interval..");
                         timer_int = int;
                     }
                     TimerEvent::Abort => {
-                        debug!("aborting master down timer..");
+                        info!("aborting master down timer..");
                         break;
                     }
                 }

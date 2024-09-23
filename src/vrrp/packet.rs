@@ -243,7 +243,7 @@ pub struct VrrpV2Packet {
     _ip_proto: u8,
     _ip_checksum: u16,
     pub ip_src: [u8; 4],
-    pub _ip_dst: [u8; 4],
+    pub ip_dst: [u8; 4],
 
     // VRRPV2 Packet Fields
     // Version (4-bits; 2 for vrrpv2, 3 for vrrpv3) + Type (4-bits; vrrp advertisement must be represented by 1)
@@ -265,6 +265,7 @@ impl VrrpV2Packet {
         priority: u8,
         auth_type: u8,
         advert_int: u8,
+        src_addr: Ipv4Addr,
         vip_addresses: Vec<Ipv4Addr>,
         auth_data: Vec<u8>,
     ) -> VrrpV2Packet {
@@ -277,8 +278,8 @@ impl VrrpV2Packet {
             ip_ttl: SOCKET_TTL,
             _ip_proto: IPPROTO_VRRPV2 as u8,
             _ip_checksum: 0,
-            ip_src: [0, 0, 0, 0],
-            _ip_dst: VRRP_MCAST_ADDR.octets(),
+            ip_src: src_addr.octets(),
+            ip_dst: VRRP_MCAST_ADDR.octets(),
             ver_type: VRRP_VER_TYPE,
             router_id,
             priority,
@@ -309,7 +310,7 @@ impl VrrpV2Packet {
                     _ip_proto: buf[9],
                     _ip_checksum: u16::from_be_bytes(buf[10..12].try_into().unwrap()),
                     ip_src: buf[12..16].try_into().unwrap(),
-                    _ip_dst: buf[16..20].try_into().unwrap(),
+                    ip_dst: buf[16..20].try_into().unwrap(),
                     ver_type: buf[20],
                     router_id: buf[21],
                     priority: buf[22],

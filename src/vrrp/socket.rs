@@ -22,6 +22,8 @@ use nix::{
     },
 };
 
+use super::interface::get_ip_address;
+
 pub fn open_ip_socket() -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
@@ -111,6 +113,40 @@ pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<Owned
         match bind(
             sock_fd.as_raw_fd(),
             &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Binding socket failed: {}", err));
+            }
+        }
+    } else {
+        match setsockopt(&sock_fd, sockopt::Ipv4Ttl, &(SOCKET_TTL as i32)) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IPv4TTL option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        let local_addr = match get_ip_address(if_name) {
+            Ok(addr) => addr,
+            Err(err) => {
+                return Err(format!("Failed to fetch local net address: {}", err));
+            }
+        };
+
+        match bind(
+            sock_fd.as_raw_fd(),
+            &SockaddrIn::new(
+                local_addr.octets()[0],
+                local_addr.octets()[1],
+                local_addr.octets()[2],
+                local_addr.octets()[3],
+                IPPROTO_VRRPV2 as u16,
+            ),
         ) {
             Ok(_) => {}
             Err(err) => {
@@ -235,6 +271,7 @@ pub fn send_advertisement_unicast(
 ) -> Result<(), String> {
     for peer in peers {
         let peer_addr_octet = peer.octets();
+        vrrp_pkt.ip_dst = peer_addr_octet.clone();
         match nix::sys::socket::sendto(
             sock_fd.as_raw_fd(),
             &vrrp_pkt.to_bytes().as_slice(),

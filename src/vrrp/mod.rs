@@ -127,6 +127,12 @@ impl VRouterConfig {
                 info!("\tPriority        {}", config.priority);
                 info!("\tAdvert Interval {}s", config.advert_int);
 
+                info!("\tVIP addresses");
+
+                for virtual_ip in config.vip_addresses.iter() {
+                    info!("\t\t- {}/{}", virtual_ip.address, virtual_ip.netmask);
+                }
+
                 match config.pre_promote_script {
                     Some(ref script) => {
                         info!("\tPre-promotion script       {}", script);
@@ -149,12 +155,6 @@ impl VRouterConfig {
                         }
                     }
                     _ => {}
-                }
-
-                info!("\tVIP addresses");
-
-                for virtual_ip in config.vip_addresses.iter() {
-                    info!("\t\t- {}/{}", virtual_ip.address, virtual_ip.netmask);
                 }
 
                 Some(config)

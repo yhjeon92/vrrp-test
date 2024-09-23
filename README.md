@@ -52,6 +52,7 @@ $ vrrp-test -r -c $CONFIG_FILE_PATH
 | vip_addresses | String Array |  | TOML Array of IPv4 address with netmask length of virtual IPv4 addresses you'd like to assign to this virtual router instance. |
 | pre_promote_script | String | Optional | OS command to execute prior to BACKUP -> MASTER promotion. |
 | pre_demote_script | String | Optional | OS command to execute prior to MASTER -> BACKUP demotion. |
+| unicast_peers | String Array | Optional | List of peer router's IPv4 addresses. Once given the packet will be unicasted instead of being mutlicasted. |
 
 ##### Example
 
@@ -63,6 +64,7 @@ advert_int = 5
 vip_addresses = [ "192.168.35.200/24" ]
 pre_promote_script = "sh -C /path/to/custom_script.sh"
 pre_demote_script = "/usr/bin/echo >> test.log"
+unicast_peers = [ "192.168.35.3", "192.168.35.4" ]
 ```
 
 #### Running with Docker compose
