@@ -22,6 +22,8 @@ use nix::{
     },
 };
 
+use super::interface::get_ip_address;
+
 pub fn open_ip_socket() -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
@@ -39,7 +41,7 @@ pub fn open_ip_socket() -> Result<OwnedFd, String> {
     Ok(sock_fd)
 }
 
-pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
+pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
     unsafe {
@@ -54,13 +56,6 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         };
     }
 
-    match set_if_multicast_flag(&sock_fd, if_name) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(err);
-        }
-    }
-
     // SOL_SOCKET, SO_REUSEADDR
     match setsockopt(&sock_fd, sockopt::ReuseAddr, &true) {
         Ok(_) => {}
@@ -73,27 +68,90 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
         }
     }
 
-    // IPPROTO_IP, IP_MULTICAST_LOOP
-    match setsockopt(&sock_fd, sockopt::IpMulticastLoop, &false) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!(
-                "Error while applying IpMulticastLoop option for socket {}: {}",
-                sock_fd.as_raw_fd().to_string(),
-                err
-            ));
+    if multicast {
+        match set_if_multicast_flag(&sock_fd, if_name) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err);
+            }
         }
-    }
 
-    // IPPROTO_IP, IP_MULTICAST_TTL
-    match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &SOCKET_TTL) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!(
-                "Error while applying IPv4TTL option for socket {}: {}",
-                sock_fd.as_raw_fd().to_string(),
-                err
-            ));
+        // IPPROTO_IP, IP_MULTICAST_LOOP
+        match setsockopt(&sock_fd, sockopt::IpMulticastLoop, &false) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IpMulticastLoop option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        // IPPROTO_IP, IP_MULTICAST_TTL
+        match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &SOCKET_TTL) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IPv4TTL option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
+
+        // IPPROTO_IP, IP_ADD_MEMBERSHIP
+        match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Error while requesting IP Membership: {}", err));
+            }
+        }
+
+        match bind(
+            sock_fd.as_raw_fd(),
+            &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Binding socket failed: {}", err));
+            }
+        }
+    } else {
+        match setsockopt(&sock_fd, sockopt::Ipv4Ttl, &(SOCKET_TTL as i32)) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IPv4TTL option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        let local_addr = match get_ip_address(if_name) {
+            Ok(addr) => addr,
+            Err(err) => {
+                return Err(format!("Failed to fetch local net address: {}", err));
+            }
+        };
+
+        match bind(
+            sock_fd.as_raw_fd(),
+            &SockaddrIn::new(
+                local_addr.octets()[0],
+                local_addr.octets()[1],
+                local_addr.octets()[2],
+                local_addr.octets()[3],
+                IPPROTO_VRRPV2 as u16,
+            ),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Binding socket failed: {}", err));
+            }
         }
     }
 
@@ -106,26 +164,6 @@ pub fn open_advertisement_socket(if_name: &str) -> Result<OwnedFd, String> {
                 if_name,
                 err.to_string()
             ));
-        }
-    }
-
-    let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
-
-    // IPPROTO_IP, IP_ADD_MEMBERSHIP
-    match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!("Error while requesting IP Membership: {}", err));
-        }
-    }
-
-    match bind(
-        sock_fd.as_raw_fd(),
-        &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
-    ) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!("Binding socket failed: {}", err));
         }
     }
 
@@ -222,8 +260,42 @@ pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) -> Result<()
         MsgFlags::empty(),
     ) {
         Ok(_) => Ok(()),
-        Err(err) => Err(format!("{}", err.to_string())),
+        Err(err) => Err(format!("Multicasting advert failed: {}", err.to_string())),
     }
+}
+
+pub fn send_advertisement_unicast(
+    sock_fd: i32,
+    mut vrrp_pkt: VrrpV2Packet,
+    peers: Vec<Ipv4Addr>,
+) -> Result<(), String> {
+    for peer in peers {
+        let peer_addr_octet = peer.octets();
+        vrrp_pkt.ip_dst = peer_addr_octet.clone();
+        match nix::sys::socket::sendto(
+            sock_fd.as_raw_fd(),
+            &vrrp_pkt.to_bytes().as_slice(),
+            &SockaddrIn::new(
+                peer_addr_octet[0],
+                peer_addr_octet[1],
+                peer_addr_octet[2],
+                peer_addr_octet[3],
+                112,
+            ),
+            MsgFlags::empty(),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Sending advert to {} failed: {}",
+                    peer,
+                    err.to_string()
+                ))
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn send_gratuitous_arp(

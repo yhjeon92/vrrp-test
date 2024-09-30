@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use crate::vrrp::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
-    socket::{send_advertisement, send_gratuitous_arp},
+    socket::{send_advertisement, send_advertisement_unicast, send_gratuitous_arp},
     Ipv4WithNetmask, VRouterConfig,
 };
 
@@ -96,6 +96,7 @@ pub struct Router {
     preempt_mode: bool,
     pre_promote_script: Option<String>,
     pre_demote_script: Option<String>,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
     vip_addresses: Vec<Ipv4WithNetmask>,
     auth_data: Vec<u8>,
     router_tx: Sender<Event>,
@@ -136,6 +137,7 @@ impl Router {
             preempt_mode: true,
             pre_promote_script: config.pre_promote_script,
             pre_demote_script: config.pre_demote_script,
+            unicast_peers: config.unicast_peers,
             vip_addresses: config.vip_addresses,
             // TODO
             auth_data: [].to_vec(),
@@ -153,6 +155,7 @@ impl Router {
             self.priority,
             self.auth_type,
             self.advert_int,
+            self.local_addr,
             Vec::<Ipv4Addr>::from(
                 self.vip_addresses
                     .iter()
@@ -190,7 +193,7 @@ impl Router {
                                         info!("Promoting to MASTER state..");
 
                                         // Multicast Advertisement
-                                        match send_advertisement(
+                                        match self.send_vrrp_advert(
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
                                         ) {
@@ -243,6 +246,7 @@ impl Router {
                                             self.advert_int,
                                             self.sock_fd.as_raw_fd(),
                                             advert_pkt.clone(),
+                                            self.unicast_peers.clone(),
                                         ));
 
                                         // Stop master down timer
@@ -326,7 +330,7 @@ impl Router {
                                     if router_id == self.router_id {
                                         if priority == 0 {
                                             // Send VRRPv2 advertisement
-                                            match send_advertisement(
+                                            match self.send_vrrp_advert(
                                                 self.sock_fd.as_raw_fd(),
                                                 advert_pkt.clone(),
                                             ) {
@@ -412,10 +416,9 @@ impl Router {
                                 info!("Promoting to MASTER state..");
 
                                 // Multicast Advertisement
-                                match send_advertisement(
-                                    self.sock_fd.as_raw_fd(),
-                                    advert_pkt.clone(),
-                                ) {
+                                match self
+                                    .send_vrrp_advert(self.sock_fd.as_raw_fd(), advert_pkt.clone())
+                                {
                                     Ok(_) => {}
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
@@ -467,6 +470,7 @@ impl Router {
                                     self.advert_int,
                                     self.sock_fd.as_raw_fd(),
                                     advert_pkt.clone(),
+                                    self.unicast_peers.clone(),
                                 ));
 
                                 // Stop master down timer
@@ -536,6 +540,7 @@ impl Router {
                                     0, /* Priority of 0 indicates Master stopped participating in VRRP */
                                     self.auth_type,
                                     self.advert_int,
+                                    self.local_addr,
                                     Vec::<Ipv4Addr>::from(
                                         self.vip_addresses
                                             .iter()
@@ -545,7 +550,9 @@ impl Router {
                                     self.auth_data.clone(),
                                 );
 
-                                match send_advertisement(self.sock_fd.as_raw_fd(), elect_pkt) {
+                                match self
+                                    .send_vrrp_advert(self.sock_fd.as_raw_fd(), elect_pkt.clone())
+                                {
                                     Ok(_) => {}
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
@@ -568,11 +575,25 @@ impl Router {
             }
         }
     }
+
+    fn send_vrrp_advert(&mut self, sock_fd: i32, vrrp_pkt: VrrpV2Packet) -> Result<(), String> {
+        match &self.unicast_peers {
+            Some(peers) => return send_advertisement_unicast(sock_fd, vrrp_pkt, peers.clone()),
+            None => return send_advertisement(sock_fd, vrrp_pkt),
+        }
+    }
 }
 
-fn start_advert_timer(advert_int: u8, sock_fd: i32, vrrp_pkt: VrrpV2Packet) -> Sender<TimerEvent> {
+fn start_advert_timer(
+    advert_int: u8,
+    sock_fd: i32,
+    vrrp_pkt: VrrpV2Packet,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
+) -> Sender<TimerEvent> {
     let (tx, rx) = channel::<TimerEvent>(3);
-    tokio::task::spawn(async move { advert_timer(advert_int, sock_fd, vrrp_pkt, rx).await });
+    tokio::task::spawn(async move {
+        advert_timer(advert_int, sock_fd, vrrp_pkt, unicast_peers, rx).await
+    });
 
     tx
 }
@@ -581,41 +602,46 @@ async fn advert_timer(
     interval: u8,
     sock_fd: i32,
     vrrp_pkt: VrrpV2Packet,
+    unicast_peers: Option<Vec<Ipv4Addr>>,
     mut rx: Receiver<TimerEvent>,
 ) {
     let mut timer_int = interval.clone();
     loop {
-        debug!("starting advertisement timer!");
-
         let sleep = tokio::time::sleep(Duration::from_secs(timer_int as u64));
         tokio::pin!(sleep);
 
         tokio::select! {
-            res = rx.recv() => {
-                match res {
-                    Some(event) => {
-                        match event {
-                            TimerEvent::ResetTimer => {
-                                debug!("resetting master down timer..");
-                            }
-                            TimerEvent::ResetInterval(int) => {
-                                debug!("resetting master down timer interval..");
-                                timer_int = int as u8;
-                            }
-                            TimerEvent::Abort => {
-                                debug!("aborting master down timer..");
-                                break;
-                            }
-                        }
-                    },
-                    None => {},
+            Some(event) = rx.recv() => {
+                match event {
+                    TimerEvent::ResetTimer => {
+                    }
+                    TimerEvent::ResetInterval(int) => {
+                        info!("resetting advertisement timer interval..");
+                        timer_int = int as u8;
+                    }
+                    TimerEvent::Abort => {
+                        info!("aborting advertisement timer..");
+                        break;
+                    }
                 }
             },
             () = &mut sleep => {
-                match send_advertisement(sock_fd, vrrp_pkt.clone()) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!("Failed to send VRRP advertisement: {}", err);
+                match unicast_peers {
+                    Some(ref peers) => {
+                        match send_advertisement_unicast(sock_fd, vrrp_pkt.clone(), peers.clone()) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("Failed to send VRRP advertisement: {}", err);
+                            }
+                        }
+                    },
+                    None => {
+                        match send_advertisement(sock_fd, vrrp_pkt.clone()) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("Failed to send VRRP advertisement: {}", err);
+                            }
+                        }
                     }
                 }
             }
@@ -633,8 +659,6 @@ fn start_master_down_timer(interval: f32, router_tx: Sender<Event>) -> Sender<Ti
 async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<TimerEvent>) {
     let mut timer_int = interval.clone();
     loop {
-        debug!("starting master down timer!");
-
         let sleep = tokio::time::sleep(Duration::from_millis((timer_int * 1000 as f32) as u64));
         tokio::pin!(sleep);
 
@@ -642,14 +666,13 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
             Some(event) = rx.recv() => {
                 match event {
                     TimerEvent::ResetTimer => {
-                        debug!("resetting master down timer..");
                     }
                     TimerEvent::ResetInterval(int) => {
-                        debug!("resetting master down timer interval..");
+                        info!("resetting master down timer interval..");
                         timer_int = int;
                     }
                     TimerEvent::Abort => {
-                        debug!("aborting master down timer..");
+                        info!("aborting master down timer..");
                         break;
                     }
                 }
