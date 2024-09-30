@@ -288,7 +288,8 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                 )) {
                     Ok(()) => {}
                     Err(err) => {
-                        error!("Failed to send event: {}", err.to_string());
+                        error!("Failed to send event: {}, exiting...", err.to_string());
+                        return;
                     }
                 }
             }
