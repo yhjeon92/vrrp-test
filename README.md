@@ -69,14 +69,6 @@ unicast_peers = [ "192.168.35.3", "192.168.35.4" ]
 
 #### Running with Docker compose
 
-- Build Docker image
-
-```shell
-$ docker build -t vrrp-test:0.1 .
-```
-
-- Run Docker compose service
-
 ```shell
 $ docker compose up -d
 ```

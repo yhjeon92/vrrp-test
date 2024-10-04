@@ -2,7 +2,7 @@ version: "3"
 
 services:
   node1:
-    image: vrrp-test:0.1
+    build: .
     container_name: node1
     hostname: node1
     tty: true
@@ -25,7 +25,7 @@ services:
       default:
         ipv4_address: 172.18.0.2
   node2:
-    image: vrrp-test:0.1
+    build: .
     container_name: node2
     hostname: node2
     tty: true
