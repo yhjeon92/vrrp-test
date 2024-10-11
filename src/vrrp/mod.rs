@@ -7,6 +7,7 @@ mod socket;
 use core::fmt;
 use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
 
+use interface::add_ipvs_service;
 use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
@@ -318,6 +319,15 @@ pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver
     };
 
     start_vrouter(config, shutdown_rx).await;
+}
+
+pub fn debugger() {
+    match add_ipvs_service(&Ipv4Addr::new(192, 1, 3, 121), 8080) {
+        Ok(()) => {}
+        Err(err) => {
+            error!("{}", err);
+        }
+    }
 }
 
 pub fn start_vrrp_listener(if_name: String) {

@@ -41,6 +41,34 @@ impl IfAddrMessage {
     }
 }
 
+// Hdr Size 4
+// <linux/genetlink.h>
+pub struct GenericNetLinkMessageHeader {
+    cmd: u8,
+    version: u8,
+    reserved: u16,
+}
+
+impl GenericNetLinkMessageHeader {
+    pub fn new(cmd: u8, version: u8) -> GenericNetLinkMessageHeader {
+        GenericNetLinkMessageHeader {
+            cmd,
+            version,
+            reserved: 0u16,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut byte_vec = Vec::<u8>::new();
+
+        byte_vec.extend_from_slice(&self.cmd.to_ne_bytes());
+        byte_vec.extend_from_slice(&self.version.to_ne_bytes());
+        byte_vec.extend_from_slice(&self.reserved.to_ne_bytes());
+
+        byte_vec
+    }
+}
+
 // Hdr Size 16
 /*
     <----------- nlmsg_total_size(len) ------------>
@@ -171,6 +199,10 @@ impl NetLinkAttributeHeader {
         }
         byte_vec
     }
+}
+
+pub fn get_padded_length(length: u16, pad_len: u16) -> u16 {
+    (length + pad_len - 1) & !(pad_len - 1)
 }
 
 // RFC 826

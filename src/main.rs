@@ -4,7 +4,7 @@ use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp::{start_vrouter_cfile, start_vrrp_listener};
+use vrrp::{debugger, start_vrouter_cfile, start_vrrp_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -34,6 +34,7 @@ fn main() {
 
     if args.debug {
         /* Test code here */
+        debugger();
         return;
     }
 
