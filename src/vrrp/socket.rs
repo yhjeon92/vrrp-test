@@ -1,5 +1,7 @@
 use std::{
     ffi::OsString,
+    io::{IoSlice, IoSliceMut},
+    mem::size_of,
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
@@ -17,12 +19,13 @@ use log::debug;
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
-        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags,
-        SockFlag, SockProtocol, SockaddrIn, SockaddrLike,
+        self, bind, recvfrom, recvmsg, sendmsg, setsockopt, sockopt, ControlMessage,
+        IpMembershipRequest, LinkAddr, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockaddrIn,
+        SockaddrLike,
     },
 };
 
-use super::interface::get_ip_address;
+use super::{interface::get_ip_address, packet::NetLinkMessageHeader};
 
 pub fn open_ip_socket() -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
@@ -413,6 +416,55 @@ pub fn send_gratuitous_arp(
                 err.to_string()
             )),
         }
+    }
+}
+
+pub fn send_netlink_message(
+    sock_fd: i32,
+    nl_header: &mut NetLinkMessageHeader,
+    payload: &mut Vec<u8>,
+) -> Result<(), String> {
+    let cmsg: [ControlMessage; 0] = [];
+    let netlink_addr = NetlinkAddr::new(0, 0);
+
+    match sendmsg::<NetlinkAddr>(
+        sock_fd,
+        &[IoSlice::new(nl_header.to_bytes(payload).as_slice())],
+        &cmsg,
+        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+        Some(&netlink_addr),
+    ) {
+        Ok(_len) => Ok(()),
+        Err(err) => Err(format!("Socket sendmsg() failed: {}", err.to_string())),
+    }
+}
+
+pub fn recv_netlink_message(
+    sock_fd: i32,
+    recv_buf: &mut [u8],
+) -> Result<NetLinkMessageHeader, String> {
+    let mut recv_cmsg_buf = Vec::<u8>::new();
+
+    let resp_len = match recvmsg::<NetlinkAddr>(
+        sock_fd,
+        &mut [IoSliceMut::new(recv_buf)],
+        Some(&mut recv_cmsg_buf),
+        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+    ) {
+        Ok(data) => data.bytes,
+        Err(err) => {
+            return Err(err.to_string());
+        }
+    };
+
+    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
+
+    match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+        Some(hdr) => Ok(hdr),
+        None => Err(format!(
+            "{}",
+            "Failed to parse a NetLink message from response",
+        )),
     }
 }
 

@@ -14,15 +14,15 @@ use nix::{
 
 use crate::vrrp::{
     constants::{
-        AF_INET, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, GENL_ID_CTRL, IFA_ADDRESS, IFA_LOCAL,
-        IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPVS_CMD_GET_SERVICE, NLM_F_ACK,
-        NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR,
-        RT_SCOPE_UNIVERSE,
+        AF_INET, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, CTRL_CMD_GETOPS, GENL_ID_CTRL,
+        IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
+        IPVS_CMD_GET_SERVICE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
+        RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
     },
     packet::{
         GenericNetLinkMessageHeader, IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader,
     },
-    socket::{open_genl_socket, open_ip_socket, open_netlink_socket},
+    socket::{open_genl_socket, open_ip_socket, open_netlink_socket, recv_netlink_message},
     Ipv4WithNetmask,
 };
 
@@ -230,11 +230,8 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     let mut nl_msg = NetLinkMessageHeader::new(
         0,
-        // RTM_NEWADDR,
-        // IP_VS_SO_SET_LIST,
         GENL_ID_CTRL,
-        NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP, // For GETFAMILY
-        // NLM_F_ACK | NLM_F_DUMP,
+        NLM_F_REQUEST | NLM_F_ACK, // For GETFAMILY
         0,
         0,
     );
@@ -242,8 +239,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     let mut payload_bytes = Vec::<u8>::new();
 
     // TODO
-    // payload_bytes.append(&mut GenericNetLinkMessageHeader::new(CTRL_CMD_GETFAMILY, 1).to_bytes());
-    payload_bytes.append(&mut GenericNetLinkMessageHeader::new(IPVS_CMD_GET_SERVICE, 1).to_bytes());
+    payload_bytes.append(&mut GenericNetLinkMessageHeader::new(CTRL_CMD_GETFAMILY, 1).to_bytes());
 
     let family_name_attr = NetLinkAttributeHeader::new(
         (size_of::<NetLinkAttributeHeader>() + 5) as u16,
@@ -260,18 +256,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     let cmsg: [ControlMessage; 0] = [];
 
     let netlink_addr = NetlinkAddr::new(0, 0);
-
-    // match sendto(
-    //     nl_sock_fd.as_raw_fd(),
-    //     &nl_msg.to_bytes(&mut payload_bytes),
-    //     &netlink_addr,
-    //     MsgFlags::empty(),
-    // ) {
-    //     Ok(_len) => {}
-    //     Err(err) => {
-    //         error!("Socket sendto() failed: {}", err.to_string())
-    //     }
-    // }
 
     match sendmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
@@ -310,7 +294,87 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
             .collect::<String>()
     );
 
+    // TODO: parse Family Id of IPVS from response
+
     const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
+
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+        Some(hdr) => hdr,
+        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
+    };
+
+    nl_resp_hdr.print();
+
+    match i32::from_ne_bytes(
+        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+            .try_into()
+            .unwrap(),
+    ) {
+        0 => {}
+        errno => {
+            error!(
+                "OS Error {}",
+                std::io::Error::from_raw_os_error(-errno).to_string()
+            );
+            // return Err(std::io::Error::from_raw_os_error(-errno).to_string());
+        }
+    }
+
+    let mut recv_buf: [u8; 1024] = [0u8; 1024];
+    recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf);
+
+    nl_msg = NetLinkMessageHeader::new(
+        0,
+        0x22,                                   // IPVS
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP, // For IPVS
+        0,
+        0,
+    );
+
+    let mut ipvs_payload = Vec::<u8>::new();
+
+    ipvs_payload.append(&mut GenericNetLinkMessageHeader::new(IPVS_CMD_GET_SERVICE, 1).to_bytes());
+
+    let cmsg: [ControlMessage; 0] = [];
+
+    let netlink_addr = NetlinkAddr::new(0, 0);
+
+    match sendmsg::<NetlinkAddr>(
+        nl_sock_fd.as_raw_fd(),
+        &[IoSlice::new(nl_msg.to_bytes(&mut ipvs_payload).as_slice())],
+        &cmsg,
+        MsgFlags::empty(),
+        Some(&netlink_addr),
+    ) {
+        Ok(_len) => {}
+        Err(err) => {
+            error!("Socket sendmsg() failed: {}", err.to_string());
+        }
+    }
+
+    let mut recv_buf: [u8; 1024] = [0u8; 1024];
+    let mut recv_cmsg_buf = Vec::<u8>::new();
+
+    let resp_len = match recvmsg::<NetlinkAddr>(
+        nl_sock_fd.as_raw_fd(),
+        &mut [IoSliceMut::new(&mut recv_buf)],
+        Some(&mut recv_cmsg_buf),
+        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+    ) {
+        Ok(data) => data.bytes,
+        Err(err) => {
+            return Err(err.to_string());
+        }
+    };
+
+    debug!("Bytes received: ");
+    debug!(
+        "{}",
+        recv_buf[0..resp_len]
+            .iter()
+            .map(|byte| format!("{:02X?} ", byte))
+            .collect::<String>()
+    );
 
     let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
         Some(hdr) => hdr,

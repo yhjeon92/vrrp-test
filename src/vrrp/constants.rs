@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 
 // Socket
+// <linux/x86_64-linux-gnu/bits/socket.h>
 pub const _AF_UNSPEC: i32 = 0x00;
 pub const AF_INET: i32 = 0x02;
 pub const _AF_NETLINK: u16 = 0x10;
@@ -12,6 +13,8 @@ pub const SOCK_RAW: i32 = 0x03;
 // Socket Flags
 pub const SOCK_CLOEXEC: i32 = 0x80000;
 
+// Protocol
+// <linux/in.h>
 pub const _IPPROTO_ICMP: i32 = 0x01;
 pub const _IPPROTO_ICMPV6: i32 = 0x3A;
 pub const _IPPROTO_TCP: i32 = 6;
@@ -43,6 +46,7 @@ pub const _NLMSG_ERROR: u16 = 0x02;
 pub const GENL_ID_CTRL: u16 = 0x10;
 
 pub const CTRL_CMD_GETFAMILY: u8 = 0x03;
+pub const CTRL_CMD_GETOPS: u8 = 0x06;
 
 // Generic NetLink Attribute Types
 pub const CTRL_ATTR_UNSPEC: u16 = 0x00;
