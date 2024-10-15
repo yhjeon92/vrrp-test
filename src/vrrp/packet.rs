@@ -1,11 +1,13 @@
-use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
+use std::{collections::HashMap, convert::TryInto, mem::size_of, net::Ipv4Addr};
 
-use log::{debug, error};
+use log::{debug, error, warn};
 
 use crate::vrrp::constants::{
     BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
     NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
 };
+
+use super::constants::GENLMSG_HDR_SIZE;
 
 // Size 8
 /* used for adding / deleting ip address to network interface via Netlink socket */
@@ -50,6 +52,18 @@ pub struct GenericNetLinkMessageHeader {
 }
 
 impl GenericNetLinkMessageHeader {
+    pub fn from_slice(buf: &[u8]) -> Option<GenericNetLinkMessageHeader> {
+        if buf.len() < size_of::<GenericNetLinkMessageHeader>() {
+            None
+        } else {
+            Some(GenericNetLinkMessageHeader {
+                cmd: buf[0],
+                version: buf[1],
+                reserved: u16::from_ne_bytes(buf[2..4].try_into().unwrap()),
+            })
+        }
+    }
+
     pub fn new(cmd: u8, version: u8) -> GenericNetLinkMessageHeader {
         GenericNetLinkMessageHeader {
             cmd,
@@ -67,6 +81,78 @@ impl GenericNetLinkMessageHeader {
 
         byte_vec
     }
+}
+
+pub fn parse_genl_msg(
+    buf: &[u8],
+) -> Result<(GenericNetLinkMessageHeader, HashMap<u16, &[u8]>), String> {
+    let genl_hdr = match GenericNetLinkMessageHeader::from_slice(&buf[0..GENLMSG_HDR_SIZE]) {
+        Some(hdr) => hdr,
+        None => {
+            return Err(format!(
+                "Failed to parse generic netlink message of len {}",
+                buf.len()
+            ));
+        }
+    };
+
+    let mut ind: usize = GENLMSG_HDR_SIZE;
+
+    Err(format!("{}", "a"))
+}
+
+// parse IPVS response message
+pub fn parse_genl_ipvs(
+    buf: &[u8],
+) -> Result<(GenericNetLinkMessageHeader, HashMap<u16, &[u8]>), String> {
+    let genl_hdr = match GenericNetLinkMessageHeader::from_slice(&buf[0..GENLMSG_HDR_SIZE]) {
+        Some(hdr) => hdr,
+        None => {
+            return Err(format!(
+                "Failed to parse generic netlink message of len {}",
+                buf.len()
+            ));
+        }
+    };
+
+    let mut ind: usize = GENLMSG_HDR_SIZE;
+    let ipvs_svc_attribute = match NetLinkAttributeHeader::_from_slice(&buf[ind..ind + 4]) {
+        Some(hdr) => hdr,
+        None => {
+            return Err(format!("Failed to parse IPVS_CMD_ATTR_SERVICE attribute"));
+        }
+    };
+
+    ind += 4;
+
+    debug!("total len {}", ipvs_svc_attribute.nla_len);
+    debug!("type {}", ipvs_svc_attribute.nla_type);
+
+    if ipvs_svc_attribute.nla_type != 0x01 {
+        return Err(format!(
+            "Invalid top-level attribute type {}: expected 1",
+            ipvs_svc_attribute.nla_type
+        ));
+    }
+
+    let mut ipvs_attr_map: HashMap<u16, &[u8]> = HashMap::new();
+
+    while ind < buf.len() {
+        // deserialize nla_len
+        let nla_len = u16::from_ne_bytes(buf[ind..ind + 2].try_into().unwrap());
+        let nla_type = u16::from_ne_bytes(buf[ind + 2..ind + 4].try_into().unwrap());
+
+        if ipvs_attr_map.contains_key(&nla_type) {
+            warn!("Duplicated attribute type {} found", nla_type);
+        } else {
+            let data = &buf[ind + 4..ind + nla_len as usize];
+            ipvs_attr_map.insert(nla_type, data);
+        }
+
+        ind += get_padded_length(nla_len, NLATTR_ALIGNTO) as usize;
+    }
+
+    Ok((genl_hdr, ipvs_attr_map))
 }
 
 // Hdr Size 16

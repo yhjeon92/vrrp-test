@@ -31,7 +31,14 @@ pub const IFR_FLAG_RUNNING: i16 = 0x40;
 pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
 
 // NetLink Message
-pub const NLMSG_ALIGNTO: u32 = 4;
+// Message Types <linux/netlink.h>
+pub const NLMSG_ERROR: u16 = 0x02;
+pub const NLMSG_DONE: u16 = 0x03;
+
+pub const NLMSG_ALIGNTO: u32 = 4; // padding length
+
+pub const NLMSG_HDR_SIZE: usize = 16;
+pub const GENLMSG_HDR_SIZE: usize = 4;
 
 // Message Types (rtnetlink)
 pub const RTM_NEWADDR: u16 = 0x14;
@@ -94,6 +101,32 @@ pub const IFA_LOCAL: u16 = 2;
 pub const _IFA_LABEL: u16 = 3;
 
 // NetLink IPVS attributes
+// Service Attributes
+pub enum IPVS_SVC_ATTR_TYPE {
+    AddressFamily,
+    Protocol,
+    Address,
+    Port,
+    Flags,
+    Timeout,
+    Netmask,
+}
+
+impl IPVS_SVC_ATTR_TYPE {
+    pub fn from(value: u16) -> IPVS_SVC_ATTR_TYPE {
+        match value {
+            1 => IPVS_SVC_ATTR_TYPE::AddressFamily,
+            2 => IPVS_SVC_ATTR_TYPE::Protocol,
+            3 => IPVS_SVC_ATTR_TYPE::Address,
+            4 => IPVS_SVC_ATTR_TYPE::Port,
+            7 => IPVS_SVC_ATTR_TYPE::Flags,
+            8 => IPVS_SVC_ATTR_TYPE::Timeout,
+            9 => IPVS_SVC_ATTR_TYPE::Netmask,
+            _ => panic!(""),
+        }
+    }
+}
+
 // Socket Options
 pub const IP_VS_BASE_CTL: u16 = 64 + 1024 + 64;
 pub const IP_VS_SO_SET_ADD: u16 = IP_VS_BASE_CTL + 2;

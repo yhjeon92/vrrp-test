@@ -16,11 +16,12 @@ use crate::vrrp::{
     constants::{
         AF_INET, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, CTRL_CMD_GETOPS, GENL_ID_CTRL,
         IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
-        IPVS_CMD_GET_SERVICE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
-        RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
+        IPVS_CMD_GET_SERVICE, NLMSG_HDR_SIZE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
+        NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
     },
     packet::{
-        GenericNetLinkMessageHeader, IfAddrMessage, NetLinkAttributeHeader, NetLinkMessageHeader,
+        parse_genl_ipvs, GenericNetLinkMessageHeader, IfAddrMessage, NetLinkAttributeHeader,
+        NetLinkMessageHeader,
     },
     socket::{open_genl_socket, open_ip_socket, open_netlink_socket, recv_netlink_message},
     Ipv4WithNetmask,
@@ -296,9 +297,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     // TODO: parse Family Id of IPVS from response
 
-    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
         Some(hdr) => hdr,
         None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
     };
@@ -306,7 +305,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     nl_resp_hdr.print();
 
     match i32::from_ne_bytes(
-        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+        recv_buf[NLMSG_HDR_SIZE..NLMSG_HDR_SIZE + 4]
             .try_into()
             .unwrap(),
     ) {
@@ -321,7 +320,9 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     }
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
-    recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf);
+
+    // expect NLMSG_ERROR with flag NLM_F_CAPPED
+    let _ = recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf);
 
     nl_msg = NetLinkMessageHeader::new(
         0,
@@ -352,7 +353,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
         }
     }
 
-    let mut recv_buf: [u8; 1024] = [0u8; 1024];
+    let mut recv_buf: [u8; 16384] = [0u8; 16384];
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
     let resp_len = match recvmsg::<NetlinkAddr>(
@@ -376,15 +377,33 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
             .collect::<String>()
     );
 
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
         Some(hdr) => hdr,
         None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
     };
 
     nl_resp_hdr.print();
 
+    match parse_genl_ipvs(&recv_buf[NLMSG_HDR_SIZE..resp_len]) {
+        Ok((a, b)) => {
+            for key in b.keys() {
+                debug!("key:\t{}", key);
+                debug!(
+                    "value:\t{}",
+                    b.get(key)
+                        .iter()
+                        .map(|byte| format!("{:02X?} ", byte))
+                        .collect::<String>()
+                );
+            }
+        }
+        Err(err) => {
+            error!("{}", err);
+        }
+    }
+
     match i32::from_ne_bytes(
-        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+        recv_buf[NLMSG_HDR_SIZE..NLMSG_HDR_SIZE + 4]
             .try_into()
             .unwrap(),
     ) {
@@ -484,9 +503,7 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             .collect::<String>()
     );
 
-    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
         Some(hdr) => hdr,
         None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
     };
@@ -494,7 +511,7 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
     nl_resp_hdr.print();
 
     match i32::from_ne_bytes(
-        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+        recv_buf[NLMSG_HDR_SIZE..NLMSG_HDR_SIZE + 4]
             .try_into()
             .unwrap(),
     ) {
@@ -588,9 +605,7 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             .collect::<String>()
     );
 
-    const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSGHDR_SIZE]) {
+    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
         Some(hdr) => hdr,
         None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
     };
@@ -598,7 +613,7 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
     nl_resp_hdr.print();
 
     match i32::from_ne_bytes(
-        recv_buf[NLMSGHDR_SIZE..NLMSGHDR_SIZE + 4]
+        recv_buf[NLMSG_HDR_SIZE..NLMSG_HDR_SIZE + 4]
             .try_into()
             .unwrap(),
     ) {
