@@ -3,6 +3,7 @@ mod interface;
 mod packet;
 mod router;
 mod socket;
+mod util;
 
 use core::fmt;
 use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};

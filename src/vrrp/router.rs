@@ -3,7 +3,6 @@ use std::{
     collections::HashSet,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
-    process::Command,
     time::Duration,
 };
 
@@ -14,6 +13,7 @@ use crate::vrrp::{
     interface::{add_ip_address, del_ip_address, get_ip_address},
     packet::VrrpV2Packet,
     socket::{send_advertisement, send_advertisement_unicast, send_gratuitous_arp},
+    util::execute_command,
     Ipv4WithNetmask, VRouterConfig,
 };
 
@@ -683,53 +683,5 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
                 break;
             },
         };
-    }
-}
-
-fn execute_command(command: String) -> Result<(), String> {
-    let mut elements = command.split_whitespace();
-
-    match elements.next() {
-        Some(program) => {
-            let mut cmd = Command::new(program);
-            elements.by_ref().for_each(|arg| {
-                cmd.arg(arg);
-            });
-
-            match cmd.output() {
-                Ok(output) => {
-                    match output.status.code().unwrap() {
-                        0 => {
-                            info!(
-                                "Command {} returned {} with status code 0",
-                                command,
-                                String::from_utf8(output.stdout).unwrap().trim_end()
-                            );
-                        }
-                        code => {
-                            warn!(
-                                "Command {} failed with status code {}: {}",
-                                command,
-                                code,
-                                String::from_utf8(output.stderr).unwrap().trim_end()
-                            );
-                        }
-                    }
-
-                    Ok(())
-                }
-                Err(err) => {
-                    warn!("Command {} failed: {}", command, err.to_string());
-                    Err(err.to_string())
-                }
-            }
-        }
-        None => {
-            warn!(
-                "Command {} seems to be empty. Check your configuration.",
-                command
-            );
-            Ok(())
-        }
     }
 }

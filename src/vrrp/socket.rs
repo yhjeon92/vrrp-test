@@ -423,7 +423,7 @@ pub fn send_netlink_message(
     sock_fd: i32,
     nl_header: &mut NetLinkMessageHeader,
     payload: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let cmsg: [ControlMessage; 0] = [];
     let netlink_addr = NetlinkAddr::new(0, 0);
 
@@ -434,7 +434,7 @@ pub fn send_netlink_message(
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
         Some(&netlink_addr),
     ) {
-        Ok(_len) => Ok(()),
+        Ok(len) => Ok(len),
         Err(err) => Err(format!("Socket sendmsg() failed: {}", err.to_string())),
     }
 }

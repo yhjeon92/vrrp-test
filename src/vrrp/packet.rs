@@ -83,6 +83,7 @@ impl GenericNetLinkMessageHeader {
     }
 }
 
+// Parse generic Netlink message
 pub fn parse_genl_msg(
     buf: &[u8],
 ) -> Result<(GenericNetLinkMessageHeader, HashMap<u16, &[u8]>), String> {
@@ -97,11 +98,29 @@ pub fn parse_genl_msg(
     };
 
     let mut ind: usize = GENLMSG_HDR_SIZE;
+    let mut ipvs_attr_map: HashMap<u16, &[u8]> = HashMap::new();
 
-    Err(format!("{}", "a"))
+    if buf.len() < ind + 4 {
+        return Ok((genl_hdr, ipvs_attr_map));
+    }
+
+    while ind < buf.len() {
+        let nla_len = u16::from_ne_bytes(buf[ind..ind + 2].try_into().unwrap());
+        let nla_type = u16::from_ne_bytes(buf[ind + 2..ind + 4].try_into().unwrap());
+
+        if ipvs_attr_map.contains_key(&nla_type) {
+            warn!("Duplicated attribute type {} found", nla_type);
+        } else {
+            let data = &buf[ind + 4..ind + nla_len as usize];
+            ipvs_attr_map.insert(nla_type, data);
+        }
+
+        ind += get_padded_length(nla_len, NLATTR_ALIGNTO) as usize;
+    }
+
+    Ok((genl_hdr, ipvs_attr_map))
 }
 
-// parse IPVS response message
 pub fn parse_genl_ipvs(
     buf: &[u8],
 ) -> Result<(GenericNetLinkMessageHeader, HashMap<u16, &[u8]>), String> {
@@ -116,7 +135,13 @@ pub fn parse_genl_ipvs(
     };
 
     let mut ind: usize = GENLMSG_HDR_SIZE;
-    let ipvs_svc_attribute = match NetLinkAttributeHeader::_from_slice(&buf[ind..ind + 4]) {
+    let mut ipvs_attr_map: HashMap<u16, &[u8]> = HashMap::new();
+
+    if buf.len() < ind + 4 {
+        return Ok((genl_hdr, ipvs_attr_map));
+    }
+
+    let ipvs_svc_attribute = match NetLinkAttributeHeader::from_slice(&buf[ind..ind + 4]) {
         Some(hdr) => hdr,
         None => {
             return Err(format!("Failed to parse IPVS_CMD_ATTR_SERVICE attribute"));
@@ -134,8 +159,6 @@ pub fn parse_genl_ipvs(
             ipvs_svc_attribute.nla_type
         ));
     }
-
-    let mut ipvs_attr_map: HashMap<u16, &[u8]> = HashMap::new();
 
     while ind < buf.len() {
         // deserialize nla_len
@@ -167,8 +190,8 @@ pub fn parse_genl_ipvs(
     <---- NLMSG_HDRLEN -----> <- NLMSG_ALIGN(len) -> <---- NLMSG_HDRLEN ---
 */
 pub struct NetLinkMessageHeader {
-    msg_len: u32,
-    msg_type: u16,
+    pub msg_len: u32,
+    pub msg_type: u16,
     msg_flags: u16,
     msg_seq: u32,
     msg_pid: u32,
@@ -259,7 +282,7 @@ impl NetLinkAttributeHeader {
         NetLinkAttributeHeader { nla_len, nla_type }
     }
 
-    pub fn _from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
+    pub fn from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
         if buf.len() < size_of::<NetLinkAttributeHeader>() {
             None
         } else {

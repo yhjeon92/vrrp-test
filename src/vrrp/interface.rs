@@ -8,22 +8,26 @@ use std::{
 
 use log::{debug, error};
 use nix::{
-    libc::{sockaddr, sockaddr_in},
+    libc::{close, sockaddr, sockaddr_in},
     sys::socket::{recvmsg, sendmsg, sendto, ControlMessage, MsgFlags, NetlinkAddr},
 };
 
 use crate::vrrp::{
     constants::{
-        AF_INET, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, CTRL_CMD_GETOPS, GENL_ID_CTRL,
-        IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
-        IPVS_CMD_GET_SERVICE, NLMSG_HDR_SIZE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
-        NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
+        AF_INET, CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, CTRL_CMD_GETOPS,
+        GENL_ID_CTRL, IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
+        IPVS_CMD_GET_SERVICE, NLMSG_ERROR, NLMSG_HDR_SIZE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP,
+        NLM_F_EXCL, NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
     },
     packet::{
-        parse_genl_ipvs, GenericNetLinkMessageHeader, IfAddrMessage, NetLinkAttributeHeader,
-        NetLinkMessageHeader,
+        parse_genl_ipvs, parse_genl_msg, GenericNetLinkMessageHeader, IfAddrMessage,
+        NetLinkAttributeHeader, NetLinkMessageHeader,
     },
-    socket::{open_genl_socket, open_ip_socket, open_netlink_socket, recv_netlink_message},
+    socket::{
+        open_genl_socket, open_ip_socket, open_netlink_socket, recv_netlink_message,
+        send_netlink_message,
+    },
+    util::execute_command,
     Ipv4WithNetmask,
 };
 
@@ -222,6 +226,13 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
 }
 
 pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
+    match execute_command("modprobe -va ip_vs".to_owned()) {
+        Ok(()) => {}
+        Err(err) => {
+            return Err(format!("Failed to initialize ip_vs: {}", err));
+        }
+    }
+
     let nl_sock_fd = match open_genl_socket() {
         Ok(fd) => fd,
         Err(err) => {
@@ -254,70 +265,72 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     payload_bytes.append(&mut family_name_attr.to_bytes(&mut family_name));
 
-    let cmsg: [ControlMessage; 0] = [];
-
-    let netlink_addr = NetlinkAddr::new(0, 0);
-
-    match sendmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &[IoSlice::new(nl_msg.to_bytes(&mut payload_bytes).as_slice())],
-        &cmsg,
-        MsgFlags::empty(),
-        Some(&netlink_addr),
-    ) {
+    match send_netlink_message(nl_sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
         Ok(_len) => {}
         Err(err) => {
-            error!("Socket sendmsg() failed: {}", err.to_string());
+            return Err(err);
         }
     }
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
-    let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &mut [IoSliceMut::new(&mut recv_buf)],
-        Some(&mut recv_cmsg_buf),
-        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    ) {
-        Ok(data) => data.bytes,
+    let mut nl_resp_hdr = match recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf) {
+        Ok(nlmsg_hdr) => nlmsg_hdr,
         Err(err) => {
-            return Err(err.to_string());
+            return Err(format!("Netlink recvmsg() error: {}", err));
         }
     };
 
     debug!("Bytes received: ");
     debug!(
         "{}",
-        recv_buf[0..resp_len]
+        recv_buf[0..nl_resp_hdr.msg_len as usize]
             .iter()
             .map(|byte| format!("{:02X?} ", byte))
             .collect::<String>()
     );
 
     // TODO: parse Family Id of IPVS from response
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
-        Some(hdr) => hdr,
-        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
-    };
-
     nl_resp_hdr.print();
 
-    match i32::from_ne_bytes(
-        recv_buf[NLMSG_HDR_SIZE..NLMSG_HDR_SIZE + 4]
-            .try_into()
-            .unwrap(),
-    ) {
-        0 => {}
-        errno => {
-            error!(
-                "OS Error {}",
-                std::io::Error::from_raw_os_error(-errno).to_string()
-            );
-            // return Err(std::io::Error::from_raw_os_error(-errno).to_string());
+    if nl_resp_hdr.msg_type == NLMSG_ERROR {
+        debug!("{}", payload_bytes.len());
+
+        payload_bytes
+            .append(&mut GenericNetLinkMessageHeader::new(CTRL_CMD_GETFAMILY, 1).to_bytes());
+        payload_bytes.append(&mut family_name_attr.to_bytes(&mut family_name));
+
+        debug!("{}", payload_bytes.len());
+
+        match send_netlink_message(nl_sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
+            Ok(_len) => {
+                nl_resp_hdr = match recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf) {
+                    Ok(nlmsg_hdr) => nlmsg_hdr,
+                    Err(err) => {
+                        return Err(format!("Netlink recvmsg() error: {}", err));
+                    }
+                };
+            }
+            Err(err) => {
+                return Err(err);
+            }
         }
     }
+
+    let ipvs_family_id =
+        match parse_genl_msg(&recv_buf[NLMSG_HDR_SIZE..nl_resp_hdr.msg_len as usize]) {
+            Ok((_genl_hdr, attributes)) => match attributes.get(&CTRL_ATTR_FAMILY_ID) {
+                Some(a) => u16::from_ne_bytes((**a)[0..2].try_into().unwrap()),
+                None => {
+                    return Err(
+                        "Failed to read IPVS netlink family Id from netlink response".to_owned(),
+                    );
+                }
+            },
+            Err(err) => {
+                return Err(format!("Failed to parse generic netlink response: {}", err));
+            }
+        };
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
 
@@ -326,7 +339,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     nl_msg = NetLinkMessageHeader::new(
         0,
-        0x22,                                   // IPVS
+        ipvs_family_id,                         // IPVS
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP, // For IPVS
         0,
         0,

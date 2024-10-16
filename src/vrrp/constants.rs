@@ -68,6 +68,7 @@ pub const CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
 // Command Attributes (generic netlink)
 // <linux/ip_vs.h>
 pub const IPVS_CMD_GET_SERVICE: u8 = 0x04;
+pub const IPVS_CMD_GET_INFO: u8 = 0x0F;
 
 // NetLink Message Flags
 pub const NLM_F_REQUEST: u16 = 0x01;
