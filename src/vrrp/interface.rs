@@ -8,8 +8,8 @@ use std::{
 
 use log::{debug, error};
 use nix::{
-    libc::{close, sockaddr, sockaddr_in},
-    sys::socket::{recvmsg, sendmsg, sendto, ControlMessage, MsgFlags, NetlinkAddr},
+    libc::{sockaddr, sockaddr_in},
+    sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr},
 };
 
 use crate::vrrp::{
@@ -27,7 +27,7 @@ use crate::vrrp::{
         open_genl_socket, open_ip_socket, open_netlink_socket, recv_netlink_message,
         send_netlink_message,
     },
-    util::execute_command,
+    util::{byte_array_into_string, execute_command},
     Ipv4WithNetmask,
 };
 
@@ -226,6 +226,7 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
 }
 
 pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
+    // init ip_vs module
     match execute_command("modprobe -va ip_vs".to_owned()) {
         Ok(()) => {}
         Err(err) => {
@@ -233,7 +234,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
         }
     }
 
-    let nl_sock_fd = match open_genl_socket() {
+    let sock_fd = match open_genl_socket() {
         Ok(fd) => fd,
         Err(err) => {
             return Err(err);
@@ -265,7 +266,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     payload_bytes.append(&mut family_name_attr.to_bytes(&mut family_name));
 
-    match send_netlink_message(nl_sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
+    match send_netlink_message(sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
         Ok(_len) => {}
         Err(err) => {
             return Err(err);
@@ -274,7 +275,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
 
-    let mut nl_resp_hdr = match recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf) {
+    let mut nl_resp_hdr = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
         Ok(nlmsg_hdr) => nlmsg_hdr,
         Err(err) => {
             return Err(format!("Netlink recvmsg() error: {}", err));
@@ -290,7 +291,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
             .collect::<String>()
     );
 
-    // TODO: parse Family Id of IPVS from response
     nl_resp_hdr.print();
 
     if nl_resp_hdr.msg_type == NLMSG_ERROR {
@@ -302,9 +302,9 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
         debug!("{}", payload_bytes.len());
 
-        match send_netlink_message(nl_sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
+        match send_netlink_message(sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
             Ok(_len) => {
-                nl_resp_hdr = match recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf) {
+                nl_resp_hdr = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
                     Ok(nlmsg_hdr) => nlmsg_hdr,
                     Err(err) => {
                         return Err(format!("Netlink recvmsg() error: {}", err));
@@ -332,10 +332,10 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
             }
         };
 
-    let mut recv_buf: [u8; 1024] = [0u8; 1024];
+    let mut recv_buf: [u8; 32768] = [0u8; 32768];
 
     // expect NLMSG_ERROR with flag NLM_F_CAPPED
-    let _ = recv_netlink_message(nl_sock_fd.as_raw_fd(), &mut recv_buf);
+    let _ = recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf);
 
     nl_msg = NetLinkMessageHeader::new(
         0,
@@ -354,7 +354,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     let netlink_addr = NetlinkAddr::new(0, 0);
 
     match sendmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
+        sock_fd.as_raw_fd(),
         &[IoSlice::new(nl_msg.to_bytes(&mut ipvs_payload).as_slice())],
         &cmsg,
         MsgFlags::empty(),
@@ -370,7 +370,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
     let resp_len = match recvmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
+        sock_fd.as_raw_fd(),
         &mut [IoSliceMut::new(&mut recv_buf)],
         Some(&mut recv_cmsg_buf),
         MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
@@ -426,7 +426,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 }
 
 pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), String> {
-    let nl_sock_fd = match open_netlink_socket() {
+    let sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
             return Err(err);
@@ -475,50 +475,27 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
         .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
-    let cmsg: [ControlMessage; 0] = [];
-
-    let netlink_addr = NetlinkAddr::new(0, 0);
-
-    match sendmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &[IoSlice::new(nl_msg.to_bytes(&mut payload_bytes).as_slice())],
-        &cmsg,
-        MsgFlags::empty(),
-        Some(&netlink_addr),
-    ) {
+    match send_netlink_message(sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
         Ok(_len) => {}
         Err(err) => {
-            error!("Socket sendmsg() failed: {}", err.to_string());
+            return Err(format!("Socket sendmsg() failed: {}", err.to_string()));
         }
     }
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
-    let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &mut [IoSliceMut::new(&mut recv_buf)],
-        Some(&mut recv_cmsg_buf),
-        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    ) {
-        Ok(data) => data.bytes,
-        Err(err) => {
-            return Err(err.to_string());
+    let nl_resp_hdr = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
+        Ok(hdr) => {
+            debug!("Bytes received: ");
+            debug!(
+                "{}",
+                byte_array_into_string(&recv_buf[0..hdr.msg_len as usize])
+            );
+            hdr
         }
-    };
-
-    debug!("Bytes received: ");
-    debug!(
-        "{}",
-        recv_buf[0..resp_len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
-        Some(hdr) => hdr,
-        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
+        Err(err) => {
+            return Err(format!("Socket recvmsg() failed: {}", err.to_string()));
+        }
     };
 
     nl_resp_hdr.print();
@@ -534,7 +511,7 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
 }
 
 pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), String> {
-    let nl_sock_fd = match open_netlink_socket() {
+    let sock_fd = match open_netlink_socket() {
         Ok(fd) => fd,
         Err(err) => {
             return Err(err);
@@ -577,50 +554,27 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
         .to_bytes(&mut Vec::from(address.address.octets())),
     );
 
-    let cmsg: [ControlMessage; 0] = [];
-
-    let netlink_addr = NetlinkAddr::new(0, 0);
-
-    match sendmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &[IoSlice::new(nl_msg.to_bytes(&mut payload_bytes).as_slice())],
-        &cmsg,
-        MsgFlags::empty(),
-        Some(&netlink_addr),
-    ) {
+    match send_netlink_message(sock_fd.as_raw_fd(), &mut nl_msg, &mut payload_bytes) {
         Ok(_len) => {}
         Err(err) => {
-            error!("Socket sendmsg() failed: {}", err.to_string());
+            return Err(format!("Socket sendmsg() failed: {}", err.to_string()));
         }
     }
 
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
-    let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
-        nl_sock_fd.as_raw_fd(),
-        &mut [IoSliceMut::new(&mut recv_buf)],
-        Some(&mut recv_cmsg_buf),
-        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    ) {
-        Ok(data) => data.bytes,
-        Err(err) => {
-            return Err(err.to_string());
+    let nl_resp_hdr = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
+        Ok(hdr) => {
+            debug!("Bytes received: ");
+            debug!(
+                "{}",
+                byte_array_into_string(&recv_buf[0..hdr.msg_len as usize])
+            );
+            hdr
         }
-    };
-
-    debug!("Bytes received: ");
-    debug!(
-        "{}",
-        recv_buf[0..resp_len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
-
-    let nl_resp_hdr = match NetLinkMessageHeader::from_slice(&recv_buf[0..NLMSG_HDR_SIZE]) {
-        Some(hdr) => hdr,
-        None => NetLinkMessageHeader::new(0, 0, 0, 0, 0),
+        Err(err) => {
+            return Err(format!("Socket recvmsg() failed: {}", err.to_string()));
+        }
     };
 
     nl_resp_hdr.print();

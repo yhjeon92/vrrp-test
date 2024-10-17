@@ -3,8 +3,9 @@ use std::{collections::HashMap, convert::TryInto, mem::size_of, net::Ipv4Addr};
 use log::{debug, error, warn};
 
 use crate::vrrp::constants::{
-    BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
-    NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
+    BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IPVS_CMD_ATTR_SERVICE,
+    IP_DSCP, IP_VER_IHL, NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR,
+    VRRP_VER_TYPE,
 };
 
 use super::constants::GENLMSG_HDR_SIZE;
@@ -153,7 +154,7 @@ pub fn parse_genl_ipvs(
     debug!("total len {}", ipvs_svc_attribute.nla_len);
     debug!("type {}", ipvs_svc_attribute.nla_type);
 
-    if ipvs_svc_attribute.nla_type != 0x01 {
+    if ipvs_svc_attribute.nla_type != IPVS_CMD_ATTR_SERVICE {
         return Err(format!(
             "Invalid top-level attribute type {}: expected 1",
             ipvs_svc_attribute.nla_type

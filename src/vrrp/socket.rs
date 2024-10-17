@@ -113,9 +113,17 @@ pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<Owned
             }
         }
 
+        let vrrp_addr = VRRP_MCAST_ADDR.octets();
+
         match bind(
             sock_fd.as_raw_fd(),
-            &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
+            &SockaddrIn::new(
+                vrrp_addr[0],
+                vrrp_addr[1],
+                vrrp_addr[2],
+                vrrp_addr[3],
+                IPPROTO_VRRPV2 as u16,
+            ),
         ) {
             Ok(_) => {}
             Err(err) => {
@@ -206,55 +214,6 @@ pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
     return Ok(sock_fd);
 }
 
-pub fn open_genl_socket() -> Result<OwnedFd, String> {
-    let sock_fd = match nix::sys::socket::socket(
-        socket::AddressFamily::Netlink,
-        socket::SockType::Raw,
-        SockFlag::SOCK_CLOEXEC,
-        SockProtocol::NetlinkGeneric,
-    ) {
-        Ok(fd) => fd,
-        Err(err) => {
-            return Err(format!(
-                "Failed to open a generic netlink socket - check the process privileges {}",
-                err.to_string()
-            ));
-        }
-    };
-
-    // socketFd - level - name - value - option_len
-    match setsockopt(&sock_fd, sockopt::SndBuf, &32768) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!(
-                "Error while setting SndBuf option for socket: {}",
-                err
-            ));
-        }
-    };
-
-    match setsockopt(&sock_fd, sockopt::RcvBuf, &32768) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!(
-                "Error while setting RcvBuf option for socket: {}",
-                err
-            ));
-        }
-    };
-
-    let sock_addr = nix::sys::socket::NetlinkAddr::new(0, 0);
-
-    match bind(sock_fd.as_raw_fd(), &sock_addr) {
-        Ok(_) => {}
-        Err(err) => {
-            return Err(format!("Error while binding Netlink socket: {}", err));
-        }
-    };
-
-    Ok(sock_fd)
-}
-
 pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     let sock_fd = match nix::sys::socket::socket(
         socket::AddressFamily::Netlink,
@@ -304,11 +263,67 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     Ok(sock_fd)
 }
 
+pub fn open_genl_socket() -> Result<OwnedFd, String> {
+    let sock_fd = match nix::sys::socket::socket(
+        socket::AddressFamily::Netlink,
+        socket::SockType::Raw,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkGeneric,
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(format!(
+                "Failed to open a generic netlink socket - check the process privileges {}",
+                err.to_string()
+            ));
+        }
+    };
+
+    // socketFd - level - name - value - option_len
+    match setsockopt(&sock_fd, sockopt::SndBuf, &32768) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while setting SndBuf option for socket: {}",
+                err
+            ));
+        }
+    };
+
+    match setsockopt(&sock_fd, sockopt::RcvBuf, &32768) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while setting RcvBuf option for socket: {}",
+                err
+            ));
+        }
+    };
+
+    let sock_addr = nix::sys::socket::NetlinkAddr::new(0, 0);
+
+    match bind(sock_fd.as_raw_fd(), &sock_addr) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!("Error while binding Netlink socket: {}", err));
+        }
+    };
+
+    Ok(sock_fd)
+}
+
 pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) -> Result<(), String> {
+    let vrrp_addr = VRRP_MCAST_ADDR.octets();
     match nix::sys::socket::sendto(
         sock_fd.as_raw_fd(),
         &vrrp_pkt.to_bytes().as_slice(),
-        &SockaddrIn::new(224, 0, 0, 18, 112),
+        &SockaddrIn::new(
+            vrrp_addr[0],
+            vrrp_addr[1],
+            vrrp_addr[2],
+            vrrp_addr[3],
+            IPPROTO_VRRPV2 as u16,
+        ),
         MsgFlags::empty(),
     ) {
         Ok(_) => Ok(()),
@@ -332,7 +347,7 @@ pub fn send_advertisement_unicast(
                 peer_addr_octet[1],
                 peer_addr_octet[2],
                 peer_addr_octet[3],
-                112,
+                IPPROTO_VRRPV2 as u16,
             ),
             MsgFlags::empty(),
         ) {

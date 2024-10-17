@@ -1,5 +1,7 @@
 use std::net::Ipv4Addr;
 
+use nix::sys::socket::{SockaddrIn, SockaddrLike};
+
 // Socket
 // <linux/x86_64-linux-gnu/bits/socket.h>
 pub const _AF_UNSPEC: i32 = 0x00;
@@ -69,6 +71,10 @@ pub const CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
 // <linux/ip_vs.h>
 pub const IPVS_CMD_GET_SERVICE: u8 = 0x04;
 pub const IPVS_CMD_GET_INFO: u8 = 0x0F;
+
+// IPVS nl attribute type in response to command
+pub const IPVS_CMD_ATTR_SERVICE: u16 = 0x01;
+pub const IPVS_CMD_ATTR_DEST: u16 = 0x02;
 
 // NetLink Message Flags
 pub const NLM_F_REQUEST: u16 = 0x01;

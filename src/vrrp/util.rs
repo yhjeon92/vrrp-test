@@ -49,3 +49,12 @@ pub fn execute_command(command: String) -> Result<(), String> {
         }
     }
 }
+
+pub fn byte_array_into_string(buf: &[u8]) -> String {
+    format!(
+        "{}",
+        buf.iter()
+            .map(|byte| format!("{:02X?} ", byte))
+            .collect::<String>()
+    )
+}
