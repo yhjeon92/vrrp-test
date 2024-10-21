@@ -1,7 +1,5 @@
 use std::net::Ipv4Addr;
 
-use nix::sys::socket::{SockaddrIn, SockaddrLike};
-
 // Socket
 // <linux/x86_64-linux-gnu/bits/socket.h>
 pub const _AF_UNSPEC: i32 = 0x00;
@@ -19,7 +17,7 @@ pub const SOCK_CLOEXEC: i32 = 0x80000;
 // <linux/in.h>
 pub const _IPPROTO_ICMP: i32 = 0x01;
 pub const _IPPROTO_ICMPV6: i32 = 0x3A;
-pub const _IPPROTO_TCP: i32 = 6;
+pub const IPPROTO_TCP: i32 = 6;
 pub const _IPPROTO_UDP: i32 = 0x11;
 pub const IPPROTO_IP: i32 = 0x00;
 pub const _IPPROTO_IPV6: i32 = 0x29;
@@ -69,6 +67,7 @@ pub const CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
 
 // Command Attributes (generic netlink)
 // <linux/ip_vs.h>
+pub const IPVS_CMD_NEW_SERVICE: u8 = 0x01;
 pub const IPVS_CMD_GET_SERVICE: u8 = 0x04;
 pub const IPVS_CMD_GET_INFO: u8 = 0x0F;
 
@@ -109,6 +108,17 @@ pub const _IFA_LABEL: u16 = 3;
 
 // NetLink IPVS attributes
 // Service Attributes
+pub const IPVS_SVC_ATTR_AF: u16 = 1;
+pub const IPVS_SVC_ATTR_PROTOCOL: u16 = 2;
+pub const IPVS_SVC_ATTR_ADDR: u16 = 3;
+pub const IPVS_SVC_ATTR_PORT: u16 = 4;
+pub const IPVS_SVC_ATTR_FWMARK: u16 = 5;
+
+pub const IPVS_SVC_ATTR_SCHED_NAME: u16 = 6;
+pub const IPVS_SVC_ATTR_FLAGS: u16 = 7;
+pub const IPVS_SVC_ATTR_TIMEOUT: u16 = 8;
+pub const IPVS_SVC_ATTR_NETMASK: u16 = 9;
+
 pub enum IPVS_SVC_ATTR_TYPE {
     AddressFamily,
     Protocol,
