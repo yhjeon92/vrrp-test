@@ -33,7 +33,7 @@ pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
 // NetLink Message
 // Message Types <linux/netlink.h>
 pub const NLMSG_ERROR: u16 = 0x02;
-pub const NLMSG_DONE: u16 = 0x03;
+pub const _NLMSG_DONE: u16 = 0x03;
 
 pub const NLMSG_ALIGNTO: u32 = 4; // padding length
 
@@ -53,27 +53,27 @@ pub const _NLMSG_ERROR: u16 = 0x02;
 pub const GENL_ID_CTRL: u16 = 0x10;
 
 pub const CTRL_CMD_GETFAMILY: u8 = 0x03;
-pub const CTRL_CMD_GETOPS: u8 = 0x06;
+pub const _CTRL_CMD_GETOPS: u8 = 0x06;
 
 // Generic NetLink Attribute Types
-pub const CTRL_ATTR_UNSPEC: u16 = 0x00;
+pub const _CTRL_ATTR_UNSPEC: u16 = 0x00;
 pub const CTRL_ATTR_FAMILY_ID: u16 = 0x01;
 pub const CTRL_ATTR_FAMILY_NAME: u16 = 0x02;
-pub const CTRL_ATTR_VERSION: u16 = 0x03;
-pub const CTRL_ATTR_HDRSIZE: u16 = 0x04;
-pub const CTRL_ATTR_MAXATTR: u16 = 0x05;
-pub const CTRL_ATTR_OPS: u16 = 0x06;
-pub const CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
+pub const _CTRL_ATTR_VERSION: u16 = 0x03;
+pub const _CTRL_ATTR_HDRSIZE: u16 = 0x04;
+pub const _CTRL_ATTR_MAXATTR: u16 = 0x05;
+pub const _CTRL_ATTR_OPS: u16 = 0x06;
+pub const _CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
 
 // Command Attributes (generic netlink)
 // <linux/ip_vs.h>
 pub const IPVS_CMD_NEW_SERVICE: u8 = 0x01;
 pub const IPVS_CMD_GET_SERVICE: u8 = 0x04;
-pub const IPVS_CMD_GET_INFO: u8 = 0x0F;
+pub const _IPVS_CMD_GET_INFO: u8 = 0x0F;
 
 // IPVS nl attribute type in response to command
 pub const IPVS_CMD_ATTR_SERVICE: u16 = 0x01;
-pub const IPVS_CMD_ATTR_DEST: u16 = 0x02;
+pub const _IPVS_CMD_ATTR_DEST: u16 = 0x02;
 
 // NetLink Message Flags
 pub const NLM_F_REQUEST: u16 = 0x01;
@@ -83,18 +83,13 @@ pub const NLM_F_ACK: u16 = 0x04;
 // Modifiers to GET request
 pub const NLM_F_ROOT: u16 = 0x100;
 pub const NLM_F_MATCH: u16 = 0x200;
-pub const NLM_F_DUMP: u16 = 0x300;
-pub const NLM_F_ATOMIC: u16 = 0x400;
+pub const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
+pub const _NLM_F_ATOMIC: u16 = 0x400;
 
 // Modifiers to NEW request
-pub const NLM_F_REPLACE: u16 = 0x100;
+pub const _NLM_F_REPLACE: u16 = 0x100;
 pub const NLM_F_EXCL: u16 = 0x200;
 pub const NLM_F_CREATE: u16 = 0x400;
-
-pub const _NLM_F_ROOT: u16 = 0x100;
-pub const _NLM_F_MATCH: u16 = 0x200;
-pub const _NLM_F_ATOMIC: u16 = 0x400;
-pub const _NLM_F_DUMP: u16 = _NLM_F_ROOT | _NLM_F_MATCH;
 
 // IFA SCOPE
 pub const RT_SCOPE_UNIVERSE: u8 = 0;
@@ -112,42 +107,12 @@ pub const IPVS_SVC_ATTR_AF: u16 = 1;
 pub const IPVS_SVC_ATTR_PROTOCOL: u16 = 2;
 pub const IPVS_SVC_ATTR_ADDR: u16 = 3;
 pub const IPVS_SVC_ATTR_PORT: u16 = 4;
-pub const IPVS_SVC_ATTR_FWMARK: u16 = 5;
+pub const _IPVS_SVC_ATTR_FWMARK: u16 = 5;
 
 pub const IPVS_SVC_ATTR_SCHED_NAME: u16 = 6;
 pub const IPVS_SVC_ATTR_FLAGS: u16 = 7;
 pub const IPVS_SVC_ATTR_TIMEOUT: u16 = 8;
 pub const IPVS_SVC_ATTR_NETMASK: u16 = 9;
-
-pub enum IPVS_SVC_ATTR_TYPE {
-    AddressFamily,
-    Protocol,
-    Address,
-    Port,
-    Flags,
-    Timeout,
-    Netmask,
-}
-
-impl IPVS_SVC_ATTR_TYPE {
-    pub fn from(value: u16) -> IPVS_SVC_ATTR_TYPE {
-        match value {
-            1 => IPVS_SVC_ATTR_TYPE::AddressFamily,
-            2 => IPVS_SVC_ATTR_TYPE::Protocol,
-            3 => IPVS_SVC_ATTR_TYPE::Address,
-            4 => IPVS_SVC_ATTR_TYPE::Port,
-            7 => IPVS_SVC_ATTR_TYPE::Flags,
-            8 => IPVS_SVC_ATTR_TYPE::Timeout,
-            9 => IPVS_SVC_ATTR_TYPE::Netmask,
-            _ => panic!(""),
-        }
-    }
-}
-
-// Socket Options
-pub const IP_VS_BASE_CTL: u16 = 64 + 1024 + 64;
-pub const IP_VS_SO_SET_ADD: u16 = IP_VS_BASE_CTL + 2;
-pub const IP_VS_SO_SET_LIST: u16 = IP_VS_BASE_CTL + 6;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 

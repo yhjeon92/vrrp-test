@@ -460,7 +460,7 @@ pub fn recv_netlink_message(
 ) -> Result<NetLinkMessageHeader, String> {
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
+    let _resp_len = match recvmsg::<NetlinkAddr>(
         sock_fd,
         &mut [IoSliceMut::new(recv_buf)],
         Some(&mut recv_cmsg_buf),

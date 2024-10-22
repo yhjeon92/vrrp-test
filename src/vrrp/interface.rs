@@ -1,25 +1,22 @@
 use std::{
     convert::TryInto,
-    io::{IoSlice, IoSliceMut},
     mem::size_of,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
 };
 
 use log::{debug, error};
-use nix::{
-    libc::{sockaddr, sockaddr_in},
-    sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, NetlinkAddr},
-};
+use nix::libc::{sockaddr, sockaddr_in};
 
 use crate::vrrp::{
     constants::{
-        AF_INET, CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, CTRL_CMD_GETOPS,
-        GENL_ID_CTRL, IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP,
-        IPPROTO_TCP, IPVS_CMD_ATTR_SERVICE, IPVS_CMD_GET_SERVICE, IPVS_CMD_NEW_SERVICE,
-        IPVS_SVC_ATTR_ADDR, IPVS_SVC_ATTR_AF, IPVS_SVC_ATTR_PORT, IPVS_SVC_ATTR_PROTOCOL,
-        NLMSG_ERROR, NLMSG_HDR_SIZE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
-        NLM_F_REQUEST, RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
+        AF_INET, CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME, CTRL_CMD_GETFAMILY, GENL_ID_CTRL,
+        IFA_ADDRESS, IFA_LOCAL, IFR_FLAG_MULTICAST, IFR_FLAG_RUNNING, IFR_FLAG_UP, IPPROTO_TCP,
+        IPVS_CMD_ATTR_SERVICE, IPVS_CMD_GET_SERVICE, IPVS_CMD_NEW_SERVICE, IPVS_SVC_ATTR_ADDR,
+        IPVS_SVC_ATTR_AF, IPVS_SVC_ATTR_FLAGS, IPVS_SVC_ATTR_NETMASK, IPVS_SVC_ATTR_PORT,
+        IPVS_SVC_ATTR_PROTOCOL, IPVS_SVC_ATTR_SCHED_NAME, IPVS_SVC_ATTR_TIMEOUT, NLMSG_ERROR,
+        NLMSG_HDR_SIZE, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
+        RTM_DELADDR, RTM_NEWADDR, RT_SCOPE_UNIVERSE,
     },
     packet::{
         parse_genl_ipvs, parse_genl_msg, GenericNetLinkMessageHeader, IfAddrMessage,
@@ -372,19 +369,25 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     // }
 
     let mut recv_buf: [u8; 16384] = [0u8; 16384];
-    let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
-        sock_fd.as_raw_fd(),
-        &mut [IoSliceMut::new(&mut recv_buf)],
-        Some(&mut recv_cmsg_buf),
-        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    ) {
-        Ok(data) => data.bytes,
+    let resp_len = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
+        Ok(hdr) => hdr.msg_len as usize,
         Err(err) => {
-            return Err(err.to_string());
+            return Err(err);
         }
     };
+
+    // let resp_len = match recvmsg::<NetlinkAddr>(
+    //     sock_fd.as_raw_fd(),
+    //     &mut [IoSliceMut::new(&mut recv_buf)],
+    //     Some(&mut recv_cmsg_buf),
+    //     MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+    // ) {
+    //     Ok(data) => data.bytes,
+    //     Err(err) => {
+    //         return Err(err.to_string());
+    //     }
+    // };
 
     debug!("Bytes received: ");
     debug!(
@@ -403,7 +406,7 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     nl_resp_hdr.print();
 
     match parse_genl_ipvs(&recv_buf[NLMSG_HDR_SIZE..resp_len]) {
-        Ok((a, b)) => {
+        Ok((_genl_hdr, b)) => {
             for key in b.keys() {
                 debug!("key:\t{}", key);
                 debug!(
@@ -433,8 +436,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     ipvs_payload.append(&mut GenericNetLinkMessageHeader::new(IPVS_CMD_NEW_SERVICE, 1).to_bytes());
 
-    // let mut ipvs_svc_attr = NetLinkAttributeHeader::new(0, IPVS_CMD_ATTR_SERVICE);
-
     let mut ipvs_nested_attrs: Vec<u8> = Vec::new();
 
     ipvs_nested_attrs.append(
@@ -454,10 +455,30 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
 
     ipvs_nested_attrs.append(
         &mut NetLinkAttributeHeader::new(6, IPVS_SVC_ATTR_PORT)
-            .to_bytes(&mut port.to_ne_bytes().to_vec()),
+            .to_bytes(&mut port.to_be_bytes().to_vec()),
     );
 
-    let mut ipvs_svc_attr =
+    ipvs_nested_attrs.append(
+        &mut NetLinkAttributeHeader::new(7, IPVS_SVC_ATTR_SCHED_NAME)
+            .to_bytes(&mut ["rr".as_bytes(), &[0]].concat()),
+    );
+
+    ipvs_nested_attrs.append(
+        &mut NetLinkAttributeHeader::new(12, IPVS_SVC_ATTR_FLAGS)
+            .to_bytes(&mut [0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF].to_vec()),
+    );
+
+    ipvs_nested_attrs.append(
+        &mut NetLinkAttributeHeader::new(8, IPVS_SVC_ATTR_TIMEOUT)
+            .to_bytes(&mut [0, 0, 0, 0].to_vec()),
+    );
+
+    ipvs_nested_attrs.append(
+        &mut NetLinkAttributeHeader::new(8, IPVS_SVC_ATTR_NETMASK)
+            .to_bytes(&mut [0xFF, 0xFF, 0xFF, 0xFF].to_vec()),
+    );
+
+    let ipvs_svc_attr =
         NetLinkAttributeHeader::new((ipvs_nested_attrs.len() + 4) as u16, IPVS_CMD_ATTR_SERVICE);
 
     ipvs_payload.append(&mut ipvs_svc_attr.to_bytes(&mut ipvs_nested_attrs));
@@ -470,17 +491,24 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
     }
 
     // TODO: receive - parse response
-    let resp_len = match recvmsg::<NetlinkAddr>(
-        sock_fd.as_raw_fd(),
-        &mut [IoSliceMut::new(&mut recv_buf)],
-        Some(&mut recv_cmsg_buf),
-        MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    ) {
-        Ok(data) => data.bytes,
+    let resp_len = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
+        Ok(hdr) => hdr.msg_len as usize,
         Err(err) => {
-            return Err(err.to_string());
+            return Err(err);
         }
     };
+
+    // let resp_len = match recvmsg::<NetlinkAddr>(
+    //     sock_fd.as_raw_fd(),
+    //     &mut [IoSliceMut::new(&mut recv_buf)],
+    //     Some(&mut recv_cmsg_buf),
+    //     MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
+    // ) {
+    //     Ok(data) => data.bytes,
+    //     Err(err) => {
+    //         return Err(err.to_string());
+    //     }
+    // };
 
     debug!("Bytes received: ");
     debug!(

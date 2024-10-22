@@ -8,7 +8,7 @@ mod util;
 use core::fmt;
 use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
 
-use interface::{add_ip_address, add_ipvs_service};
+use interface::add_ipvs_service;
 use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
 use router::{Event, Router};
