@@ -355,19 +355,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
         }
     }
 
-    // match sendmsg::<NetlinkAddr>(
-    //     sock_fd.as_raw_fd(),
-    //     &[IoSlice::new(nl_msg.to_bytes(&mut ipvs_payload).as_slice())],
-    //     &cmsg,
-    //     MsgFlags::empty(),
-    //     Some(&netlink_addr),
-    // ) {
-    //     Ok(_len) => {}
-    //     Err(err) => {
-    //         error!("Socket sendmsg() failed: {}", err.to_string());
-    //     }
-    // }
-
     let mut recv_buf: [u8; 16384] = [0u8; 16384];
 
     let resp_len = match recv_netlink_message(sock_fd.as_raw_fd(), &mut recv_buf) {
@@ -376,18 +363,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
             return Err(err);
         }
     };
-
-    // let resp_len = match recvmsg::<NetlinkAddr>(
-    //     sock_fd.as_raw_fd(),
-    //     &mut [IoSliceMut::new(&mut recv_buf)],
-    //     Some(&mut recv_cmsg_buf),
-    //     MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    // ) {
-    //     Ok(data) => data.bytes,
-    //     Err(err) => {
-    //         return Err(err.to_string());
-    //     }
-    // };
 
     debug!("Bytes received: ");
     debug!(
@@ -498,18 +473,6 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
         }
     };
 
-    // let resp_len = match recvmsg::<NetlinkAddr>(
-    //     sock_fd.as_raw_fd(),
-    //     &mut [IoSliceMut::new(&mut recv_buf)],
-    //     Some(&mut recv_cmsg_buf),
-    //     MsgFlags::intersection(MsgFlags::MSG_TRUNC, MsgFlags::MSG_PEEK),
-    // ) {
-    //     Ok(data) => data.bytes,
-    //     Err(err) => {
-    //         return Err(err.to_string());
-    //     }
-    // };
-
     debug!("Bytes received: ");
     debug!(
         "{}",
@@ -536,6 +499,33 @@ pub fn add_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
         0 => Ok(()),
         errno => Err(std::io::Error::from_raw_os_error(-errno).to_string()),
     }
+}
+
+pub fn del_ipvs_service(address: &Ipv4Addr, port: u16) -> Result<(), String> {
+    Ok(())
+}
+
+pub fn add_ipvs_destination(address: &Ipv4Addr, port: u16) -> Result<(), String> {
+    // init ip_vs module
+    match execute_command("modprobe -va ip_vs".to_owned()) {
+        Ok(()) => {}
+        Err(err) => {
+            return Err(format!("Failed to initialize ip_vs: {}", err));
+        }
+    }
+
+    let sock_fd = match open_genl_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    Ok(())
+}
+
+pub fn del_ipvs_destination(address: &Ipv4Addr, port: u16) -> Result<(), String> {
+    Ok(())
 }
 
 pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), String> {

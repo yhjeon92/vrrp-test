@@ -69,6 +69,7 @@ pub const _CTRL_ATTR_MCAST_GROUPS: u16 = 0x07;
 // <linux/ip_vs.h>
 pub const IPVS_CMD_NEW_SERVICE: u8 = 0x01;
 pub const IPVS_CMD_GET_SERVICE: u8 = 0x04;
+pub const IPVS_CMD_NEW_DEST: u8 = 0x05;
 pub const _IPVS_CMD_GET_INFO: u8 = 0x0F;
 
 // IPVS nl attribute type in response to command
@@ -113,6 +114,15 @@ pub const IPVS_SVC_ATTR_SCHED_NAME: u16 = 6;
 pub const IPVS_SVC_ATTR_FLAGS: u16 = 7;
 pub const IPVS_SVC_ATTR_TIMEOUT: u16 = 8;
 pub const IPVS_SVC_ATTR_NETMASK: u16 = 9;
+
+// Destination Attributes
+pub const IPVS_DEST_ATTR_ADDR: u16 = 1;
+pub const IPVS_DEST_ATTR_PORT: u16 = 2;
+pub const IPVS_DEST_ATTR_FWD_METHOD: u16 = 3;
+pub const IPVS_DEST_ATTR_WEIGHT: u16 = 4;
+pub const IPVS_DEST_ATTR_U_THRESH: u16 = 5;
+pub const IPVS_DEST_ATTR_L_THRESH: u16 = 6;
+pub const IPVS_DEST_ATTR_ADDR_FAMILY: u16 = 11;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 
