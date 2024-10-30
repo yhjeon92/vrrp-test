@@ -67,7 +67,11 @@ pub fn set_if_multicast_flag(sock_fd: &OwnedFd, if_name: &str) -> Result<(), Str
         // UP (0x01), RUNNING (0x40), MULTICAST (0x1000)
         if_opts.ifr_flags |= IFR_FLAG_UP | IFR_FLAG_RUNNING | IFR_FLAG_MULTICAST;
 
-        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCSIFFLAGS, &mut if_opts);
+        let res = nix::libc::ioctl(
+            sock_fd.as_raw_fd(),
+            nix::libc::SIOCSIFFLAGS.try_into().unwrap(),
+            &mut if_opts,
+        );
         if res < 0 {
             return Err(format!(
                 "Cannot manipulate network interface {}: {}",
@@ -112,7 +116,11 @@ pub fn get_ip_address(if_name: &str) -> Result<Ipv4Addr, String> {
     };
 
     unsafe {
-        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCGIFADDR, &mut if_opts);
+        let res = nix::libc::ioctl(
+            sock_fd.as_raw_fd(),
+            nix::libc::SIOCGIFADDR.try_into().unwrap(),
+            &mut if_opts,
+        );
         if res < 0 {
             return Err(format!(
                 "Failed to get primary IPv4 address of interface {}: {}",
@@ -178,7 +186,11 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
     };
 
     unsafe {
-        let res = nix::libc::ioctl(sock_fd.as_raw_fd(), nix::libc::SIOCGIFHWADDR, &mut if_opts);
+        let res = nix::libc::ioctl(
+            sock_fd.as_raw_fd(),
+            nix::libc::SIOCGIFHWADDR.try_into().unwrap(),
+            &mut if_opts,
+        );
         if res < 0 {
             return Err(format!(
                 "Failed to query Hardware address for interface {}: {}",
