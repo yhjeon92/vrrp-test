@@ -100,7 +100,15 @@ pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<Owned
             }
         }
 
-        let ip_mreq = IpMembershipRequest::new(VRRP_MCAST_ADDR, Some(Ipv4Addr::new(0, 0, 0, 0)));
+        let ip_mreq = IpMembershipRequest::new(
+            VRRP_MCAST_ADDR,
+            Some(match get_ip_address(if_name) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    return Err(format!("Failed to join multicast group: {}", err));
+                }
+            }),
+        );
 
         // IPPROTO_IP, IP_ADD_MEMBERSHIP
         match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {

@@ -1,7 +1,13 @@
 pub mod vrrp;
 
+use aes_gcm::{
+    aead::{Aead, AeadMut, Nonce, OsRng},
+    AeadCore, Aes256Gcm, Key, KeyInit,
+};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use clap::Parser;
 use log::{error, info};
+use nix::libc::newlocale;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
 use vrrp::{start_vrouter_cfile, start_vrrp_listener};
@@ -34,6 +40,41 @@ fn main() {
 
     if args.debug {
         /* Test code here */
+        let key_str = "very_strong_line_of_password_pad";
+        let key = Key::<Aes256Gcm>::from_slice(key_str.as_bytes());
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+        let plaintext = "zalando";
+        let cipher = Aes256Gcm::new(key);
+        let ciphered_data = match cipher.encrypt(&nonce, plaintext.as_bytes()) {
+            Ok(ciphered) => ciphered,
+            Err(err) => {
+                error!("{}", err.to_string());
+                return;
+            }
+        };
+
+        let mut encrypted_data: Vec<u8> = nonce.to_vec();
+        encrypted_data.extend_from_slice(&ciphered_data);
+
+        let encoded = BASE64_STANDARD.encode(encrypted_data);
+        info!("{}", encoded);
+
+        let decoded = BASE64_STANDARD
+            .decode(encoded)
+            .expect("failed to decode password string");
+
+        let (nonce_arr, ciphered_arr) = decoded.split_at(12);
+
+        let plaintext = cipher
+            .decrypt(&nonce, ciphered_arr)
+            .expect("failed to decrypt given password string");
+
+        info!(
+            "decoded: {}",
+            String::from_utf8(plaintext).expect("failed to encode decrypted password string")
+        );
+
         return;
     }
 

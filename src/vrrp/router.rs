@@ -523,18 +523,6 @@ impl Router {
                                     None => {}
                                 }
 
-                                for virtual_ip in self.vip_addresses.iter() {
-                                    // Delete virtual ip bound to interface
-                                    match del_ip_address(&self.if_name, virtual_ip) {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
-                                            error!("exiting..");
-                                            return;
-                                        }
-                                    }
-                                }
-
                                 let elect_pkt = VrrpV2Packet::build(
                                     self.router_id,
                                     0, /* Priority of 0 indicates Master stopped participating in VRRP */
@@ -556,6 +544,18 @@ impl Router {
                                     Ok(_) => {}
                                     Err(err) => {
                                         warn!("Failed to send VRRP advertisement: {}", err);
+                                    }
+                                }
+
+                                for virtual_ip in self.vip_addresses.iter() {
+                                    // Delete virtual ip bound to interface
+                                    match del_ip_address(&self.if_name, virtual_ip) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
+                                            error!("exiting..");
+                                            return;
+                                        }
                                     }
                                 }
 
