@@ -5,7 +5,7 @@ mod router;
 mod socket;
 
 use core::fmt;
-use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
+use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::OwnedFd, str::FromStr};
 
 use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
@@ -14,8 +14,11 @@ use serde::{
     de::Error,
     {Deserialize, Serialize},
 };
-use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
-use tokio::sync::mpsc::{self, Receiver};
+use socket::{open_advertisement_socket, open_arp_socket, read_vrrp_packet, recv_vrrp_packet};
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    oneshot,
+};
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -197,8 +200,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         }
     };
 
-    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
-
     let (tx, rx) = mpsc::channel::<Event>(3);
 
     let arp_sock_fd = match open_arp_socket(&if_name) {
@@ -240,61 +241,75 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
 
     let tx_handle = tx.clone();
 
-    _ = tx.send(Event::Startup).await;
+    match tx.send(Event::Startup).await {
+        Ok(()) => {
+            // do nothing
+        }
+        Err(err) => {
+            error!("TEST_LOG: {}", err.to_string());
+            return;
+        }
+    }
 
     info!("Router Startup");
     info!("Listening for vRRPv2 packets...");
 
+    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
+
+    let (listener_tx, mut listener_rx) = mpsc::channel::<()>(5);
+
     // Main Loop
-    tokio::task::spawn_blocking(move || loop {
-        let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-            Ok(pkt) => pkt,
-            Err(err) => {
-                error!("{}", err.to_string());
-                continue;
-            }
-        };
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok(vrrp_pkt) = read_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) => {
+                    let router_id = vrrp_pkt.router_id;
+                    let priority = vrrp_pkt.priority;
+                    let src_addr = vrrp_pkt.ip_src.clone();
 
-        let router_id = vrrp_pkt.router_id;
-        let priority = vrrp_pkt.priority;
-        let src_addr = vrrp_pkt.ip_src.clone();
+                    match vrrp_pkt.verify() {
+                        Ok(_) => {
+                            /* additional packet validation using local VRouter config */
+                            if vrrp_pkt.router_id != config.router_id {
+                                debug!(
+                                "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
+                                vrrp_pkt.router_id,
+                                config.router_id
+                            );
+                                continue;
+                            }
 
-        match vrrp_pkt.verify() {
-            Ok(_) => {
-                /* additional packet validation using local VRouter config */
-                if vrrp_pkt.router_id != config.router_id {
-                    debug!(
-                        "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
-                        vrrp_pkt.router_id,
-                        config.router_id
-                    );
-                    continue;
-                }
+                            if vrrp_pkt.advert_int != config.advert_int {
+                                debug!(
+                                "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
+                                vrrp_pkt.advert_int,
+                                config.advert_int
+                            );
+                                continue;
+                            }
 
-                if vrrp_pkt.advert_int != config.advert_int {
-                    debug!(
-                        "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
-                        vrrp_pkt.advert_int,
-                        config.advert_int
-                    );
-                    continue;
-                }
-
-                match tx.blocking_send(Event::AdvertReceived(
-                    router_id,
-                    priority,
-                    Ipv4Addr::from(src_addr),
-                    vrrp_pkt.vip_addresses,
-                )) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        error!("Failed to send event: {}, exiting...", err.to_string());
-                        return;
+                            match tx.blocking_send(Event::AdvertReceived(
+                                router_id,
+                                priority,
+                                Ipv4Addr::from(src_addr),
+                                vrrp_pkt.vip_addresses,
+                            )) {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    error!("Failed to send event: {}, exiting...", err.to_string());
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Invalid VRRP packet received: {}", err);
+                        }
                     }
-                }
-            }
-            Err(err) => {
-                warn!("Invalid VRRP packet received: {}", err);
+                },
+                Some(()) = listener_rx.recv() => {
+                    info!("Aborting VRRP listener!");
+                    break;
+                },
             }
         }
     });
@@ -302,11 +317,98 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     loop {
         match shutdown_rx.recv().await {
             Some(()) => {
-                _ = tx_handle.clone().send(Event::ShutDown).await;
+                debug!("Stopping a router thread");
+                match tx_handle.clone().send(Event::ShutDown).await {
+                    Ok(()) => match tx_handle.clone().send(Event::ShutDown).await {
+                        Ok(()) => {
+                            debug!("Succees");
+                        }
+                        Err(err) => {
+                            debug!("Error: {}", err.to_string());
+                        }
+                    },
+                    Err(err) => {
+                        debug!("Error: {}", err.to_string());
+                    }
+                }
+                debug!("Stopping a packet receiver");
+                match listener_tx.send(()).await {
+                    Ok(_) => {
+                        debug!("Gracefully shut down a packet receiver thread..");
+                    }
+                    Err(_) => {
+                        debug!("Failed to stop xxx.. force shuting down");
+                    }
+                }
             }
             None => {}
         }
     }
+    // // Main
+    // loop {
+    //     tokio::select! {
+    //         Some(()) = shutdown_rx.recv() => {
+    //             info!("TEST_LOG: shutdown_rx received");
+    //             _ = tx_handle.clone().send(Event::ShutDown).await;
+    //             return;
+    //         },
+    //         Ok(vrrp_pkt) = read_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) => {
+    //             let router_id = vrrp_pkt.router_id;
+    //             let priority = vrrp_pkt.priority;
+    //             let src_addr = vrrp_pkt.ip_src.clone();
+
+    //             match vrrp_pkt.verify() {
+    //                 Ok(_) => {
+    //                     /* additional packet validation using local VRouter config */
+    //                     if vrrp_pkt.router_id != config.router_id {
+    //                         debug!(
+    //                         "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
+    //                         vrrp_pkt.router_id,
+    //                         config.router_id
+    //                     );
+    //                     } else if vrrp_pkt.advert_int != config.advert_int {
+    //                         debug!(
+    //                         "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
+    //                         vrrp_pkt.advert_int,
+    //                         config.advert_int
+    //                     );
+    //                     } else {
+    //                         match tx
+    //                         .send(Event::AdvertReceived(
+    //                             router_id,
+    //                             priority,
+    //                             Ipv4Addr::from(src_addr),
+    //                             vrrp_pkt.vip_addresses,
+    //                         ))
+    //                         .await
+    //                     {
+    //                         Ok(()) => {}
+    //                         Err(err) => {
+    //                             error!("Failed to send event: {}, exiting...", err.to_string());
+    //                             return;
+    //                         }
+    //                     }
+    //                     }
+    //                 }
+    //                 Err(err) => {
+    //                     warn!("Invalid VRRP packet received: {}", err);
+    //                 }
+    //             }
+    //         },
+    //         // _ = start_vrrp_listener(
+    //         //     config.clone(),
+    //         //     match vrrp_sock_fd.try_clone() {
+    //         //     Ok(fd) => fd,
+    //         //     Err(err) => {
+    //         //         error!("Failed to clone socket fd: {}, exiting...", err.to_string());
+    //         //         return;
+    //         //     }},
+    //         //     tx_handle.clone()) => {
+    //         //     info!("start_vrrp_listener method returned");
+    //         //     return;
+    //         // },
+    //     }
+    // }
 }
 
 pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver<()>) {
