@@ -165,6 +165,21 @@ impl Router {
             self.auth_data.clone(),
         );
 
+        let elect_pkt = VrrpV2Packet::build(
+            self.router_id,
+            0, /* Priority of 0 indicates Master stopped participating in VRRP */
+            self.auth_type,
+            self.advert_int,
+            self.local_addr,
+            Vec::<Ipv4Addr>::from(
+                self.vip_addresses
+                    .iter()
+                    .map(|addr| addr.address)
+                    .collect::<Vec<Ipv4Addr>>(),
+            ),
+            self.auth_data.clone(),
+        );
+
         info!("MASTER DOWN INTERVAL set to {}", self.master_down_int);
 
         let mut master_timer_tx: Option<Sender<TimerEvent>> = None;
@@ -203,41 +218,11 @@ impl Router {
                                             }
                                         }
 
-                                        match &self.pre_promote_script {
-                                            Some(command) => {
-                                                _ = execute_command(command.to_owned());
-                                            }
-                                            None => {}
-                                        }
-
-                                        for virtual_ip in self.vip_addresses.iter() {
-                                            // Broadcast Gratuitous ARP
-                                            match send_gratuitous_arp(
-                                                self.arp_sock_fd.as_raw_fd(),
-                                                &self.if_name,
-                                                self.router_id,
-                                                virtual_ip,
-                                            ) {
-                                                Ok(_) => {}
-                                                Err(err) => {
-                                                    error!(
-                                                        "Failed to send gratuitous ARP request: {}",
-                                                        err
-                                                    );
-                                                    error!("exiting...");
-                                                    return;
-                                                }
-                                            }
-
-                                            // Add virtual ip address to interface
-                                            match add_ip_address(&self.if_name, virtual_ip) {
-                                                Ok(_) => {}
-                                                Err(err) => {
-                                                    error!("Failed to add IP address {} to interface {}: {}",
-                                                    virtual_ip, &self.if_name, err);
-                                                    error!("exiting...");
-                                                    return;
-                                                }
+                                        match self.promote_to_master() {
+                                            Ok(()) => {}
+                                            Err(err) => {
+                                                error!("Failed to initialize as master: {}", err);
+                                                return;
                                             }
                                         }
 
@@ -353,6 +338,18 @@ impl Router {
                                                 }
                                                 None => { /* */ }
                                             }
+
+                                            // Acquire virtual IP
+                                            // This does not comply with RFC 3768 - additional safety measure for Cloud environment
+                                            // where bare-metal ip link addr and arping is not sufficient to acquire Virtual IP
+                                            match self.promote_to_master() {
+                                                Ok(()) => {}
+                                                Err(err) => {
+                                                    error!("Failed to promote: {}", err);
+                                                    return;
+                                                }
+                                            }
+
                                             // Received an Advert with higher priority - demoting to BACKUP
                                         } else if (!self.preempt_mode || priority > self.priority)
                                             || (priority == self.priority
@@ -403,6 +400,22 @@ impl Router {
                                                 self.router_tx.clone(),
                                             ));
 
+                                            // Send election packet (VRRP advertisement with 0 priority)
+                                            // This does not comply with RFC 3768 along with a master which received priority=0 advert -
+                                            // additional safety measure for Cloud environment
+                                            match self.send_vrrp_advert(
+                                                self.sock_fd.as_raw_fd(),
+                                                elect_pkt.clone(),
+                                            ) {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    warn!(
+                                                        "Failed to send VRRP advertisement: {}",
+                                                        err
+                                                    );
+                                                }
+                                            }
+
                                             self.state = State::Backup;
                                         }
                                     }
@@ -425,43 +438,11 @@ impl Router {
                                     }
                                 }
 
-                                match &self.pre_promote_script {
-                                    Some(command) => {
-                                        _ = execute_command(command.to_owned());
-                                    }
-                                    None => {}
-                                }
-
-                                for virtual_ip in self.vip_addresses.iter() {
-                                    // Broadcast Gratuitous ARP
-                                    match send_gratuitous_arp(
-                                        self.arp_sock_fd.as_raw_fd(),
-                                        &self.if_name,
-                                        self.router_id,
-                                        virtual_ip,
-                                    ) {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            error!(
-                                                "Failed to send gratuitous ARP request: {}",
-                                                err
-                                            );
-                                            error!("exiting...");
-                                            return;
-                                        }
-                                    }
-
-                                    // Add virtual ip address to interface
-                                    match add_ip_address(&self.if_name, virtual_ip) {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            error!(
-                                                "Failed to add IP address {} to interface {}: {}",
-                                                virtual_ip, &self.if_name, err
-                                            );
-                                            error!("exiting...");
-                                            return;
-                                        }
+                                match self.promote_to_master() {
+                                    Ok(()) => {}
+                                    Err(err) => {
+                                        error!("Failed to promote: {}", err);
+                                        return;
                                     }
                                 }
 
@@ -523,21 +504,6 @@ impl Router {
                                     None => {}
                                 }
 
-                                let elect_pkt = VrrpV2Packet::build(
-                                    self.router_id,
-                                    0, /* Priority of 0 indicates Master stopped participating in VRRP */
-                                    self.auth_type,
-                                    self.advert_int,
-                                    self.local_addr,
-                                    Vec::<Ipv4Addr>::from(
-                                        self.vip_addresses
-                                            .iter()
-                                            .map(|addr| addr.address)
-                                            .collect::<Vec<Ipv4Addr>>(),
-                                    ),
-                                    self.auth_data.clone(),
-                                );
-
                                 match self
                                     .send_vrrp_advert(self.sock_fd.as_raw_fd(), elect_pkt.clone())
                                 {
@@ -581,6 +547,49 @@ impl Router {
             Some(peers) => return send_advertisement_unicast(sock_fd, vrrp_pkt, peers.clone()),
             None => return send_advertisement(sock_fd, vrrp_pkt),
         }
+    }
+
+    fn promote_to_master(&mut self) -> Result<(), String> {
+        match &self.pre_promote_script {
+            Some(command) => match execute_command(command.to_owned()) {
+                Ok(()) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to execute pre_promote script [{}]: {}",
+                        command, err
+                    ));
+                }
+            },
+            None => {}
+        }
+
+        for virtual_ip in self.vip_addresses.iter() {
+            // Broadcast Gratuitous ARP
+            match send_gratuitous_arp(
+                self.arp_sock_fd.as_raw_fd(),
+                &self.if_name,
+                self.router_id,
+                virtual_ip,
+            ) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(format!("Failed to send gratuitous ARP request: {}", err));
+                }
+            }
+
+            // Add virtual ip address to interface
+            match add_ip_address(&self.if_name, virtual_ip) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to add IP address {} to interface {}: {}",
+                        virtual_ip, &self.if_name, err
+                    ))
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
