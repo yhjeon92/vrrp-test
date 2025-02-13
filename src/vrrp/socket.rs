@@ -401,33 +401,3 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
 
     return Ok(vrrp_pkt);
 }
-
-pub async fn read_vrrp_packet(
-    sock_fd: &OwnedFd,
-    pkt_buf: &mut [u8],
-) -> Result<VrrpV2Packet, String> {
-    let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
-        Ok((pkt_len, _)) => pkt_len,
-        Err(err) => {
-            return Err(format!("recvfrom() error: {}", err.to_string()));
-        }
-    };
-
-    debug!("VRRPv2 socket received a packet:");
-    debug!(
-        "{}",
-        pkt_buf[0..len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
-
-    let vrrp_pkt = match VrrpV2Packet::from_slice(&pkt_buf[0..len]) {
-        Some(pkt) => pkt,
-        None => {
-            return Err("failed to deserialize VRRPv2 advert packet".to_string());
-        }
-    };
-
-    return Ok(vrrp_pkt);
-}

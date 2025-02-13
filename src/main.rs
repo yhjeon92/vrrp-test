@@ -56,7 +56,6 @@ fn main() {
             ctrlc::set_handler(move || {
                 info!("received shutdown signal..");
                 _ = shutdown_tx.clone().blocking_send(());
-                _ = shutdown_tx.clone().blocking_send(());
             })
             .expect("failed to setup signal handler");
 
