@@ -6,6 +6,7 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
+use itertools::Itertools;
 use log::{debug, error};
 use nix::{
     libc::{sockaddr, sockaddr_in},
@@ -129,15 +130,6 @@ pub fn get_ip_address(if_name: &str) -> Result<Ipv4Addr, String> {
             ));
         }
 
-        debug!(
-            "{}",
-            if_opts
-                .ifr_addr
-                .iter()
-                .map(|byte| format!("{:02X?} ", byte))
-                .collect::<String>()
-        );
-
         let sockaddr =
             core::mem::transmute::<*mut [u8; 16], *mut sockaddr_in>(&mut if_opts.ifr_addr);
 
@@ -199,15 +191,6 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
             ));
         }
 
-        debug!(
-            "{}",
-            if_opts
-                .ifr_addr
-                .iter()
-                .map(|byte| format!("{:02X?} ", byte))
-                .collect::<String>()
-        );
-
         let sockaddr = core::mem::transmute::<*mut [u8; 16], *mut sockaddr>(&mut if_opts.ifr_addr);
 
         let hwaddr: [i8; 6] = sockaddr.read().sa_data[0..6].try_into().unwrap();
@@ -221,8 +204,8 @@ pub fn get_mac_address(if_name: &str) -> Result<[u8; 6], String> {
             "MAC converted: {}",
             hwaddr_converted
                 .iter()
-                .map(|byte| format!("{:02X?} ", byte))
-                .collect::<String>()
+                .map(|byte| format!("{:02x?}", byte))
+                .join(":")
         );
 
         Ok(hwaddr_converted)
@@ -299,7 +282,7 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
+    match recvmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
         &mut [IoSliceMut::new(&mut recv_buf)],
         Some(&mut recv_cmsg_buf),
@@ -310,15 +293,6 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             return Err(err.to_string());
         }
     };
-
-    debug!("Bytes received: ");
-    debug!(
-        "{}",
-        recv_buf[0..resp_len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
 
     const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
 
@@ -335,7 +309,20 @@ pub fn add_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             .unwrap(),
     ) {
         0 => Ok(()),
-        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string()),
+        errno => {
+            let code = -errno;
+            // Linux EEXIST
+            if code == 17 {
+                debug!(
+                    "Address {} already exists on the interface {}",
+                    address.address.to_string(),
+                    if_name
+                );
+                Ok(())
+            } else {
+                Err(std::io::Error::from_raw_os_error(-errno).to_string())
+            }
+        }
     }
 }
 
@@ -403,7 +390,7 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
     let mut recv_buf: [u8; 1024] = [0u8; 1024];
     let mut recv_cmsg_buf = Vec::<u8>::new();
 
-    let resp_len = match recvmsg::<NetlinkAddr>(
+    match recvmsg::<NetlinkAddr>(
         nl_sock_fd.as_raw_fd(),
         &mut [IoSliceMut::new(&mut recv_buf)],
         Some(&mut recv_cmsg_buf),
@@ -414,15 +401,6 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             return Err(err.to_string());
         }
     };
-
-    debug!("Bytes received: ");
-    debug!(
-        "{}",
-        recv_buf[0..resp_len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
 
     const NLMSGHDR_SIZE: usize = size_of::<NetLinkMessageHeader>();
 
@@ -439,6 +417,19 @@ pub fn del_ip_address(if_name: &str, address: &Ipv4WithNetmask) -> Result<(), St
             .unwrap(),
     ) {
         0 => Ok(()),
-        errno => Err(std::io::Error::from_raw_os_error(-errno).to_string()),
+        errno => {
+            let code = -errno;
+            // Linux EADDRNOTAVAIL
+            if code == 99 {
+                debug!(
+                    "Address {} does not exist on the interface {}",
+                    address.address.to_string(),
+                    if_name
+                );
+                Ok(())
+            } else {
+                Err(std::io::Error::from_raw_os_error(-errno).to_string())
+            }
+        }
     }
 }

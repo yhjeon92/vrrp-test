@@ -5,7 +5,7 @@ mod router;
 mod socket;
 
 use core::fmt;
-use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::OwnedFd, str::FromStr};
+use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::AsRawFd, str::FromStr};
 
 use log::{debug, error, info, warn};
 use packet::VrrpV2Packet;
@@ -15,14 +15,7 @@ use serde::{
     {Deserialize, Serialize},
 };
 use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
-use tokio::{
-    select,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        oneshot,
-    },
-    task,
-};
+use tokio::sync::mpsc::{self, Receiver};
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -116,7 +109,7 @@ impl VRouterConfig {
         }
 
         match toml::from_str::<VRouterConfig>(&contents) {
-            Ok(config) => {
+            Ok(mut config) => {
                 if config.vip_addresses.len() < 1 {
                     error!("No virtual ip is configured");
                     return None;
@@ -128,6 +121,12 @@ impl VRouterConfig {
                         return None;
                     }
                 }
+
+                if config.advert_int == 0 {
+                    warn!("VRRP advertisement interval must be at least 1 second");
+                    config.advert_int = 1;
+                }
+
                 info!("Router configured:");
                 info!("\tInterface       {}", config.interface);
                 info!("\tRouter ID       {}", config.router_id);
@@ -268,79 +267,99 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         }
     };
 
-    let advert_listener = task::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         loop {
-            if let Ok(vrrp_pkt) = recv_vrrp_packet(&vrrp_sock_fd_cloned, &mut pkt_buf) {
-                let router_id = vrrp_pkt.router_id;
-                let priority = vrrp_pkt.priority;
-                let src_addr = vrrp_pkt.ip_src.clone();
+            match recv_vrrp_packet(&vrrp_sock_fd_cloned, &mut pkt_buf) {
+                Ok(vrrp_pkt) => {
+                    let router_id = vrrp_pkt.router_id;
+                    let priority = vrrp_pkt.priority;
+                    let src_addr = vrrp_pkt.ip_src.clone();
 
-                match vrrp_pkt.verify() {
-                    Ok(_) => {
-                        /* additional packet validation using local VRouter config */
-                        if vrrp_pkt.router_id != config.router_id {
-                            debug!(
+                    match vrrp_pkt.verify() {
+                        Ok(_) => {
+                            /* additional packet validation using local VRouter config */
+                            if vrrp_pkt.router_id != config.router_id {
+                                debug!(
                                     "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
                                     vrrp_pkt.router_id,
                                     config.router_id
                                 );
 
-                            continue;
-                        }
+                                continue;
+                            }
 
-                        if vrrp_pkt.advert_int != config.advert_int {
-                            debug!(
+                            if vrrp_pkt.advert_int != config.advert_int {
+                                debug!(
                                     "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
                                     vrrp_pkt.advert_int,
                                     config.advert_int
                                 );
 
-                            continue;
-                        }
+                                continue;
+                            }
 
-                        match tx.blocking_send(Event::AdvertReceived(
-                            router_id,
-                            priority,
-                            Ipv4Addr::from(src_addr),
-                            vrrp_pkt.vip_addresses,
-                        )) {
-                            Ok(()) => {}
-                            Err(err) => {
-                                error!("Failed to send event: {}, exiting...", err.to_string());
-                                return;
+                            match tx.blocking_send(Event::AdvertReceived(
+                                router_id,
+                                priority,
+                                Ipv4Addr::from(src_addr),
+                                vrrp_pkt.vip_addresses,
+                            )) {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    error!("Failed to send event: {}, exiting...", err.to_string());
+                                    return;
+                                }
                             }
                         }
+                        Err(err) => {
+                            warn!("Invalid VRRP packet received: {}", err);
+                        }
                     }
-                    Err(err) => {
-                        warn!("Invalid VRRP packet received: {}", err);
-                    }
+                }
+                Err(err) => {
+                    warn!("Reading VRRP packet failed: {}", err);
+                    break;
                 }
             }
         }
     });
 
-    select! {
-        _ = shutdown_rx.recv() => {
-            debug!("Stopping a router thread");
-            match tx_handle.clone().send(Event::ShutDown).await {
-                Ok(()) => match tx_handle.clone().send(Event::ShutDown).await {
-                    Ok(()) => {
-                        debug!("Succees");
-                    }
+    loop {
+        match shutdown_rx.recv().await {
+            Some(()) => {
+                debug!("Stopping a router thread");
+                match tx_handle.clone().send(Event::ShutDown).await {
+                    Ok(()) => match tx_handle.clone().send(Event::ShutDown).await {
+                        Ok(()) => {
+                            debug!("Succees");
+                        }
+                        Err(err) => {
+                            debug!("Error: {}", err.to_string());
+                        }
+                    },
                     Err(err) => {
                         debug!("Error: {}", err.to_string());
                     }
-                },
-                Err(err) => {
-                    debug!("Error: {}", err.to_string());
                 }
+                debug!("Stopping a packet receiver");
+                match nix::sys::socket::shutdown(
+                    vrrp_sock_fd.as_raw_fd(),
+                    nix::sys::socket::Shutdown::Both,
+                ) {
+                    Ok(()) => {
+                        debug!("socket dropped");
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to drop an advert listening socket: {}",
+                            err.to_string()
+                        );
+                    }
+                }
+                break;
             }
-            debug!("Stopping a packet receiver");
-            drop(vrrp_sock_fd);
-        },
-        _ = advert_listener => {
-            info!("VRRP advert listener terminated");
-        },
+            None => {}
+        }
     }
 
     info!("virtual router terminated");

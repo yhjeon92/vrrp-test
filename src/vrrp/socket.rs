@@ -13,6 +13,7 @@ use crate::vrrp::{
     packet::{GarpPacket, VrrpV2Packet},
     Ipv4WithNetmask,
 };
+use itertools::Itertools;
 use log::debug;
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
@@ -383,21 +384,29 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
         }
     };
 
-    debug!("VRRPv2 socket received a packet:");
-    debug!(
-        "{}",
-        pkt_buf[0..len]
-            .iter()
-            .map(|byte| format!("{:02X?} ", byte))
-            .collect::<String>()
-    );
-
     let vrrp_pkt = match VrrpV2Packet::from_slice(&pkt_buf[0..len]) {
         Some(pkt) => pkt,
         None => {
             return Err("failed to deserialize VRRPv2 advert packet".to_string());
         }
     };
+
+    debug!(
+        "Received a VRRPv2 packet: RouterID [{}] Priority [{}] VIPs [{}] Advert Int [{}] SRC [{}]",
+        vrrp_pkt.router_id,
+        vrrp_pkt.priority,
+        vrrp_pkt
+            .vip_addresses
+            .iter()
+            .map(|address| format!("{}", address.to_string()))
+            .join(", "),
+        vrrp_pkt.advert_int,
+        vrrp_pkt
+            .ip_src
+            .iter()
+            .map(|byte| format!("{}", byte))
+            .join(".")
+    );
 
     return Ok(vrrp_pkt);
 }

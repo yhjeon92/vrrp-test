@@ -222,7 +222,18 @@ impl Router {
                                             Ok(()) => {}
                                             Err(err) => {
                                                 error!("Failed to initialize as master: {}", err);
-                                                return;
+                                                info!("Retrying initialization..");
+
+                                                match self.router_tx.send(Event::Startup).await {
+                                                    Ok(()) => {}
+                                                    Err(err) => {
+                                                        error!(
+                                                            "Failed to re-initialize: {}",
+                                                            err.to_string()
+                                                        );
+                                                    }
+                                                }
+                                                continue;
                                             }
                                         }
 
@@ -345,8 +356,22 @@ impl Router {
                                             match self.promote_to_master() {
                                                 Ok(()) => {}
                                                 Err(err) => {
-                                                    error!("Failed to promote: {}", err);
-                                                    return;
+                                                    error!("Failed to acquire virtual ip: {}", err);
+                                                    warn!("Reset timer and remain as BACKUP..");
+
+                                                    if let Some(ref tx) = advert_timer_tx {
+                                                        _ = tx.send(TimerEvent::Abort).await;
+                                                    }
+
+                                                    master_timer_tx =
+                                                        Some(start_master_down_timer(
+                                                            self.master_down_int,
+                                                            self.router_tx.clone(),
+                                                        ));
+
+                                                    self.state = State::Backup;
+
+                                                    continue;
                                                 }
                                             }
 
@@ -375,22 +400,13 @@ impl Router {
 
                                             advert_timer_tx = None;
 
-                                            match &self.pre_demote_script {
-                                                Some(command) => {
-                                                    _ = execute_command(command.to_owned());
-                                                }
-                                                None => {}
-                                            }
-
-                                            for virtual_ip in self.vip_addresses.iter() {
-                                                // Delete virtual ip bound to interface
-                                                match del_ip_address(&self.if_name, virtual_ip) {
-                                                    Ok(_) => {}
-                                                    Err(err) => {
-                                                        error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
-                                                        error!("exiting..");
-                                                        return;
-                                                    }
+                                            match self.demote_to_backup(&elect_pkt) {
+                                                Ok(()) => {}
+                                                Err(err) => {
+                                                    warn!(
+                                                        "Error while demoting to backup: {}",
+                                                        err
+                                                    );
                                                 }
                                             }
 
@@ -399,22 +415,6 @@ impl Router {
                                                 self.master_down_int,
                                                 self.router_tx.clone(),
                                             ));
-
-                                            // Send election packet (VRRP advertisement with 0 priority)
-                                            // This does not comply with RFC 3768 along with a master which received priority=0 advert -
-                                            // additional safety measure for Cloud environment
-                                            match self.send_vrrp_advert(
-                                                self.sock_fd.as_raw_fd(),
-                                                elect_pkt.clone(),
-                                            ) {
-                                                Ok(_) => {}
-                                                Err(err) => {
-                                                    warn!(
-                                                        "Failed to send VRRP advertisement: {}",
-                                                        err
-                                                    );
-                                                }
-                                            }
 
                                             self.state = State::Backup;
                                         }
@@ -442,7 +442,18 @@ impl Router {
                                     Ok(()) => {}
                                     Err(err) => {
                                         error!("Failed to promote: {}", err);
-                                        return;
+                                        warn!("Reset timer and remain as BACKUP..");
+
+                                        match master_timer_tx {
+                                            Some(ref tx) => {
+                                                _ = tx.send(TimerEvent::ResetTimer).await
+                                            }
+                                            None => {
+                                                warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                            }
+                                        };
+
+                                        continue;
                                     }
                                 }
 
@@ -497,31 +508,10 @@ impl Router {
                                     }
                                 };
 
-                                match &self.pre_demote_script {
-                                    Some(command) => {
-                                        _ = execute_command(command.to_owned());
-                                    }
-                                    None => {}
-                                }
-
-                                match self
-                                    .send_vrrp_advert(self.sock_fd.as_raw_fd(), elect_pkt.clone())
-                                {
-                                    Ok(_) => {}
+                                match self.demote_to_backup(&elect_pkt) {
+                                    Ok(()) => {}
                                     Err(err) => {
-                                        warn!("Failed to send VRRP advertisement: {}", err);
-                                    }
-                                }
-
-                                for virtual_ip in self.vip_addresses.iter() {
-                                    // Delete virtual ip bound to interface
-                                    match del_ip_address(&self.if_name, virtual_ip) {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            error!("Failed to delete IP address {} from interface {}: {}", virtual_ip, &self.if_name, err);
-                                            error!("exiting..");
-                                            return;
-                                        }
+                                        warn!("Error while demoting to backup: {}", err);
                                     }
                                 }
 
@@ -529,7 +519,8 @@ impl Router {
                             }
                             State::Initialize => {
                                 info!("Termination signal received. Exiting..");
-                                std::process::exit(0);
+                                return;
+                                // std::process::exit(0);
                             }
                         },
                     };
@@ -547,6 +538,43 @@ impl Router {
             Some(peers) => return send_advertisement_unicast(sock_fd, vrrp_pkt, peers.clone()),
             None => return send_advertisement(sock_fd, vrrp_pkt),
         }
+    }
+
+    fn demote_to_backup(&mut self, elect_pkt: &VrrpV2Packet) -> Result<(), String> {
+        match &self.pre_demote_script {
+            Some(command) => match execute_command(command.to_owned()) {
+                Ok(()) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to execute pre_demote script [{}]: {}",
+                        command, err
+                    ));
+                }
+            },
+            None => {}
+        }
+
+        match self.send_vrrp_advert(self.sock_fd.as_raw_fd(), elect_pkt.clone()) {
+            Ok(_) => {}
+            Err(err) => {
+                warn!("Failed to send VRRP election request: {}", err);
+            }
+        }
+
+        for virtual_ip in self.vip_addresses.iter() {
+            // Delete virtual ip bound to interface
+            match del_ip_address(&self.if_name, virtual_ip) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to delete IP address {} from interface {}: {}",
+                        virtual_ip, &self.if_name, err
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn promote_to_master(&mut self) -> Result<(), String> {
@@ -688,7 +716,12 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
             },
             () = &mut sleep => {
                 warn!("Master Unhealthy");
-                _ = tx.send(Event::MasterDown).await;
+                match tx.send(Event::MasterDown).await {
+                    Ok(()) => {},
+                    Err(err) => {
+                        warn!("Failed to send router event: {}", err.to_string());
+                    },
+                }
                 break;
             },
         };
@@ -706,27 +739,28 @@ fn execute_command(command: String) -> Result<(), String> {
             });
 
             match cmd.output() {
-                Ok(output) => {
-                    match output.status.code().unwrap() {
-                        0 => {
-                            info!(
-                                "Command {} returned {} with status code 0",
-                                command,
-                                String::from_utf8(output.stdout).unwrap().trim_end()
-                            );
-                        }
-                        code => {
-                            warn!(
-                                "Command {} failed with status code {}: {}",
-                                command,
-                                code,
-                                String::from_utf8(output.stderr).unwrap().trim_end()
-                            );
-                        }
+                Ok(output) => match output.status.code().unwrap() {
+                    0 => {
+                        info!(
+                            "Command {} returned {} with status code 0",
+                            command,
+                            String::from_utf8(output.stdout).unwrap().trim_end()
+                        );
+                        Ok(())
                     }
-
-                    Ok(())
-                }
+                    code => {
+                        let err_msg = format!(
+                            "{} {}",
+                            String::from_utf8(output.stdout).unwrap().trim_end(),
+                            String::from_utf8(output.stderr).unwrap().trim_end()
+                        );
+                        warn!(
+                            "Command {} failed with status code {}: {}",
+                            command, code, err_msg
+                        );
+                        Err(err_msg)
+                    }
+                },
                 Err(err) => {
                     warn!("Command {} failed: {}", command, err.to_string());
                     Err(err.to_string())
