@@ -62,17 +62,15 @@ impl fmt::Display for Event {
 }
 
 enum TimerEvent {
-    ResetTimer,
-    ResetInterval(f32),
+    ResetTimerInterval(f32),
     Abort,
 }
 
 impl fmt::Display for TimerEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            TimerEvent::ResetTimer => write!(f, "ResetTimer"),
-            TimerEvent::ResetInterval(int) => {
-                write!(f, "ResetInterval {}s", int)
+            TimerEvent::ResetTimerInterval(int) => {
+                write!(f, "ResetTimerInterval {}s", int)
             }
             TimerEvent::Abort => {
                 write!(f, "Abort")
@@ -129,7 +127,7 @@ impl Router {
             router_id: config.router_id,
             priority: config.priority,
             advert_int: config.advert_int,
-            // TODO: backward compatibility
+            // for backward compatibility
             auth_type: 1,
             master_down_int: (3 as f32 * config.advert_int as f32)
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
@@ -139,7 +137,7 @@ impl Router {
             pre_demote_script: config.pre_demote_script,
             unicast_peers: config.unicast_peers,
             vip_addresses: config.vip_addresses,
-            // TODO
+            // not in use since authenticating via auth_data field is discouraged
             auth_data: [].to_vec(),
             router_tx: tx,
             router_rx: rx,
@@ -286,7 +284,7 @@ impl Router {
                                             match master_timer_tx {
                                                 Some(ref tx) => {
                                                     _ = tx
-                                                        .send(TimerEvent::ResetInterval(
+                                                        .send(TimerEvent::ResetTimerInterval(
                                                             self.skew_time,
                                                         ))
                                                         .await
@@ -309,7 +307,7 @@ impl Router {
                                                     match master_timer_tx {
                                                         Some(ref tx) => {
                                                             _ = tx
-                                                                .send(TimerEvent::ResetTimer)
+                                                                .send(TimerEvent::ResetTimerInterval(self.master_down_int))
                                                                 .await
                                                         }
                                                         None => {
@@ -342,7 +340,7 @@ impl Router {
                                             match advert_timer_tx {
                                                 Some(ref tx) => {
                                                     _ = tx
-                                                        .send(TimerEvent::ResetInterval(
+                                                        .send(TimerEvent::ResetTimerInterval(
                                                             self.advert_int as f32,
                                                         ))
                                                         .await;
@@ -444,14 +442,10 @@ impl Router {
                                         error!("Failed to promote: {}", err);
                                         warn!("Reset timer and remain as BACKUP..");
 
-                                        match master_timer_tx {
-                                            Some(ref tx) => {
-                                                _ = tx.send(TimerEvent::ResetTimer).await
-                                            }
-                                            None => {
-                                                warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
-                                            }
-                                        };
+                                        master_timer_tx = Some(start_master_down_timer(
+                                            self.master_down_int,
+                                            self.router_tx.clone(),
+                                        ));
 
                                         continue;
                                     }
@@ -476,7 +470,7 @@ impl Router {
                                 self.state = State::Master;
                             }
                             _ => {
-                                // TODO
+                                // No Action
                             }
                         },
                         Event::ShutDown => match self.state {
@@ -520,7 +514,6 @@ impl Router {
                             State::Initialize => {
                                 info!("Termination signal received. Exiting..");
                                 return;
-                                // std::process::exit(0);
                             }
                         },
                     };
@@ -650,9 +643,7 @@ async fn advert_timer(
         tokio::select! {
             Some(event) = rx.recv() => {
                 match event {
-                    TimerEvent::ResetTimer => {
-                    }
-                    TimerEvent::ResetInterval(int) => {
+                    TimerEvent::ResetTimerInterval(int) => {
                         info!("resetting advertisement timer interval..");
                         timer_int = int as u8;
                     }
@@ -702,9 +693,7 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
         tokio::select! {
             Some(event) = rx.recv() => {
                 match event {
-                    TimerEvent::ResetTimer => {
-                    }
-                    TimerEvent::ResetInterval(int) => {
+                    TimerEvent::ResetTimerInterval(int) => {
                         info!("resetting master down timer interval..");
                         timer_int = int;
                     }
