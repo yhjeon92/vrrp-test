@@ -22,7 +22,6 @@ use nix::{
         SockFlag, SockProtocol, SockaddrIn, SockaddrLike,
     },
 };
-use tokio::sync::mpsc::Sender;
 
 use super::{constants::{AF_INET6, RTMGRP_IPV4_IFADDR, RTMGRP_LINK, RTM_DELADDR, RTM_NEWADDR}, interface::get_ip_address, packet::NetLinkMessageHeader};
 
@@ -428,41 +427,6 @@ pub fn send_gratuitous_arp(
 }
 
 pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
-    let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
-        Ok((pkt_len, _)) => pkt_len,
-        Err(err) => {
-            return Err(format!("recvfrom() error: {}", err.to_string()));
-        }
-    };
-
-    let vrrp_pkt = match VrrpV2Packet::from_slice(&pkt_buf[0..len]) {
-        Some(pkt) => pkt,
-        None => {
-            return Err("failed to deserialize VRRPv2 advert packet".to_string());
-        }
-    };
-
-    debug!(
-        "Received a VRRPv2 packet: RouterID [{}] Priority [{}] VIPs [{}] Advert Int [{}] SRC [{}]",
-        vrrp_pkt.router_id,
-        vrrp_pkt.priority,
-        vrrp_pkt
-            .vip_addresses
-            .iter()
-            .map(|address| format!("{}", address.to_string()))
-            .join(", "),
-        vrrp_pkt.advert_int,
-        vrrp_pkt
-            .ip_src
-            .iter()
-            .map(|byte| format!("{}", byte))
-            .join(".")
-    );
-
-    return Ok(vrrp_pkt);
-}
-
-pub async fn recv_vrrp_packet_async(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2Packet, String> {
     let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
         Ok((pkt_len, _)) => pkt_len,
         Err(err) => {

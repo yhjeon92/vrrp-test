@@ -5,7 +5,7 @@ mod router;
 mod socket;
 
 use core::fmt;
-use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::AsRawFd, str::FromStr};
+use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
 
 use interface::get_if_index;
 use log::{debug, error, info, warn};
@@ -15,8 +15,8 @@ use serde::{
     de::Error,
     {Deserialize, Serialize},
 };
-use socket::{open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet, recv_vrrp_packet_async};
-use tokio::sync::mpsc::{self, channel, Receiver};
+use socket::{open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet};
+use tokio::{sync::mpsc::{self, channel, Receiver, Sender}, task::JoinSet};
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -189,7 +189,13 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
 }
 
 pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
+    let (tx_vrrp, mut rx_vrrp) = mpsc::channel::<VrrpV2Packet>(1);
+    let (tx_netlink, mut rx_netlink) = mpsc::channel::<Vec<NetLinkAttribute>>(1);
+
+    let (tx_router, rx_router) = mpsc::channel::<Event>(3);
+
     let if_name = config.interface.clone();
+
     let vrrp_sock_fd = match open_advertisement_socket(
         &if_name,
         match config.unicast_peers {
@@ -203,8 +209,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             return;
         }
     };
-
-    let (tx, rx) = mpsc::channel::<Event>(3);
 
     let arp_sock_fd = match open_arp_socket(&if_name) {
         Ok(fd) => fd,
@@ -227,8 +231,8 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             }
         },
         arp_sock_fd,
-        tx.clone(),
-        rx,
+        tx_router.clone(),
+        rx_router,
         config.clone(),
     ) {
         Ok(router) => router,
@@ -243,9 +247,9 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
 
     tokio::spawn(async move { router.start().await });
 
-    let tx_handle = tx.clone();
+    let tx_handle = tx_router.clone();
 
-    match tx.send(Event::Startup).await {
+    match tx_router.send(Event::Startup).await {
         Ok(()) => {
             // do nothing
         }
@@ -258,76 +262,77 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     info!("Router Startup");
     info!("Listening for vRRPv2 packets...");
 
-    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
-
-    let vrrp_sock_fd_cloned = match vrrp_sock_fd.try_clone() {
-        Ok(fd) => fd,
+    let mut monitor_handles = match start_monitor_task(
+        &config.interface, 
+        match config.unicast_peers {
+            Some(_) => false,
+            None => true,
+        },
+        tx_vrrp, 
+        tx_netlink
+    ).await {
+        Ok(handles) => handles,
         Err(err) => {
-            error!("Failed to clone socket fd: {}, exiting...", err.to_string());
+            error!("{}", err);
             return;
         }
     };
 
-    tokio::task::spawn_blocking(move || {
-        loop {
-            match recv_vrrp_packet(&vrrp_sock_fd_cloned, &mut pkt_buf) {
-                Ok(vrrp_pkt) => {
-                    let router_id = vrrp_pkt.router_id;
-                    let priority = vrrp_pkt.priority;
-                    let src_addr = vrrp_pkt.ip_src.clone();
+    loop {
+        tokio::select! {
+            Some(vrrp_pkt) = rx_vrrp.recv() => {
+                let router_id = vrrp_pkt.router_id;
+                let priority = vrrp_pkt.priority;
+                let src_addr = vrrp_pkt.ip_src.clone();
 
-                    match vrrp_pkt.verify() {
-                        Ok(_) => {
-                            /* additional packet validation using local VRouter config */
-                            if vrrp_pkt.router_id != config.router_id {
-                                debug!(
-                                    "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
-                                    vrrp_pkt.router_id,
-                                    config.router_id
-                                );
+                match vrrp_pkt.verify() {
+                    Ok(_) => {
+                        /* additional packet validation using local VRouter config */
+                        if vrrp_pkt.router_id != config.router_id {
+                            debug!(
+                                "Mismatching router id of received packet {} - local router id is configured to {}, discarding packet..",
+                                vrrp_pkt.router_id,
+                                config.router_id
+                            );
 
-                                continue;
-                            }
-
-                            if vrrp_pkt.advert_int != config.advert_int {
-                                debug!(
-                                    "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
-                                    vrrp_pkt.advert_int,
-                                    config.advert_int
-                                );
-
-                                continue;
-                            }
-
-                            match tx.blocking_send(Event::AdvertReceived(
-                                router_id,
-                                priority,
-                                Ipv4Addr::from(src_addr),
-                                vrrp_pkt.vip_addresses,
-                            )) {
-                                Ok(()) => {}
-                                Err(err) => {
-                                    error!("Failed to send event: {}, exiting...", err.to_string());
-                                    return;
-                                }
-                            }
+                            continue;
                         }
-                        Err(err) => {
-                            warn!("Invalid VRRP packet received: {}", err);
+
+                        if vrrp_pkt.advert_int != config.advert_int {
+                            debug!(
+                                "Mismatching advert interval of received packet {}s - local advert interval is configured to {}s, discarding packet..",
+                                vrrp_pkt.advert_int,
+                                config.advert_int
+                            );
+
+                            continue;
+                        }
+
+                        match tx_router.send(Event::AdvertReceived(
+                            router_id,
+                            priority,
+                            Ipv4Addr::from(src_addr),
+                            vrrp_pkt.vip_addresses,
+                        )).await {
+                            Ok(()) => {}
+                            Err(err) => {
+                                error!("Failed to send event: {}, exiting...", err.to_string());
+                                return;
+                            }
                         }
                     }
+                    Err(err) => {
+                        warn!("Invalid VRRP packet received: {}", err);
+                    }
                 }
-                Err(err) => {
-                    warn!("Reading VRRP packet failed: {}", err);
-                    break;
+            },
+            Some(attrs) = rx_netlink.recv() => {
+                info!("Received Netlink Event");
+                for attr in attrs.iter() {
+                    attr.print();
                 }
-            }
-        }
-    });
-
-    loop {
-        match shutdown_rx.recv().await {
-            Some(()) => {
+            },
+            Some(()) = shutdown_rx.recv() => {
                 debug!("Stopping a router thread");
                 match tx_handle.clone().send(Event::ShutDown).await {
                     Ok(()) => match tx_handle.clone().send(Event::ShutDown).await {
@@ -342,24 +347,10 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                         debug!("Error: {}", err.to_string());
                     }
                 }
-                debug!("Stopping a packet receiver");
-                match nix::sys::socket::shutdown(
-                    vrrp_sock_fd.as_raw_fd(),
-                    nix::sys::socket::Shutdown::Both,
-                ) {
-                    Ok(()) => {
-                        debug!("socket dropped");
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Failed to drop an advert listening socket: {}",
-                            err.to_string()
-                        );
-                    }
-                }
+
+                monitor_handles.shutdown().await;
                 break;
             }
-            None => {}
         }
     }
 
@@ -377,72 +368,24 @@ pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver
     start_vrouter(config, shutdown_rx).await;
 }
 
-pub async fn start_vrrp_listener(if_name: String) {
-    let vrrp_sock_fd = match open_advertisement_socket(&if_name, true) {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!("Failed to open a socket: {}, exiting...", err.to_string());
-            return;
-        }
-    };
-
-    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
-
-    info!("Listening for vRRPv2 packets...");
-
-    // TODO: Netlink Monitor Test
-    let nl_sock_fd = match open_netlink_monitor_socket() {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!("Failed to open a netlink socket: {}, exiting...", err.to_string());
-            return;
-        }
-    };
-
-    let if_ind = match get_if_index(&if_name) {
-        Ok(ind) => ind,
+pub async fn start_listener(if_name: String) {
+    let (tx_vr, mut rx_vr) = channel::<VrrpV2Packet>(1);
+    let (tx_nl, mut rx_nl) = channel::<Vec<NetLinkAttribute>>(1);
+    
+    match start_monitor_task(&if_name, false, tx_vr, tx_nl).await {
+        Ok(_handles) => {},
         Err(err) => {
             error!("{}", err);
             return;
         }
     };
 
-    let mut nl_pkt_buf: [u8; 1024] = [0u8; 1024];
-
-    let (tx_vr, mut rx_vr) = channel::<VrrpV2Packet>(1);
-    let (tx_nl, mut rx_nl) = channel::<Vec<NetLinkAttribute>>(1);
-    
-    tokio::task::spawn_blocking(move || {
-        loop {
-            match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-                Ok(pkt) => {
-                    let _ = tx_vr.blocking_send(pkt);
-                },
-                Err(err) => {
-                    error!("Fail VR {}", err);
-                },
-            }
-        }
-    });
-
-    tokio::task::spawn_blocking(move || {
-        loop {
-            match recv_nl_packet(&nl_sock_fd, &mut nl_pkt_buf, if_ind) {
-                Ok(attributes) => {
-                    let _ = tx_nl.blocking_send(attributes);
-                },
-                Err(err) => {
-                    error!("Fail NL {}", err);
-                }
-            }
-        }
-    });
-
     loop {
         debug!("[TEST] Listening...");
         tokio::select! {
             Some(pkt) = rx_vr.recv() => {
                 info!("Received VRRP advertisement");
+                pkt.print();
             },
             Some(attrs) = rx_nl.recv() => {
                 info!("Received Netlink Event");
@@ -454,37 +397,65 @@ pub async fn start_vrrp_listener(if_name: String) {
     };
 }
 
-pub fn test_nl_monitor(if_name: &str) {
-    // let sock_fd = match open_netlink_monitor_socket() {
-    //     Ok(fd) => fd,
-    //     Err(err) => {
-    //         error!("{}", err);
-    //         return;
-    //     }
-    // };
+async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Sender<VrrpV2Packet>, tx_netlink: Sender<Vec<NetLinkAttribute>>)
+    -> Result<JoinSet<()>, String>
+{
+    let mut tasks = JoinSet::new();
 
-    // let if_ind = match get_if_index(if_name) {
-    //     Ok(ind) => ind,
-    //     Err(err) => {
-    //         error!("{}", err);
-    //         return;
-    //     }
-    // };
+    let vrrp_sock_fd = match open_advertisement_socket(if_name, advert_multicast) {
+        Ok(fd) => fd,
+        Err(err) => {
+            error!("Failed to open a socket: {}, exiting...", err.to_string());
+            return Err("".to_string());
+        }
+    };
 
-    // let mut pkt_buf: [u8; 1024] = [0u8; 1024];
+    let nl_sock_fd = match open_netlink_monitor_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            error!("Failed to open a netlink socket: {}, exiting...", err.to_string());
+            return Err("".to_string());
+        }
+    };
 
-    // loop {
-    //     match recv_nl_packet(&sock_fd, &mut pkt_buf, if_ind) {
-    //         Ok(hdr) => {
-    //             if hdr.len() > 0 {
-    //                 for nl_attr in hdr.iter() {
-    //                     nl_attr.print();
-    //                 }
-    //             }
-    //         },
-    //         Err(err) => {
-    //             error!("{}", err);
-    //         },
-    //     }
-    // }
+    let if_ind = match get_if_index(if_name) {
+        Ok(ind) => ind,
+        Err(err) => {
+            error!("{}", err);
+            return Err("".to_string());
+        }
+    };
+
+    let mut pkt_buf: [u8; 1024] = [0u8; 1024];
+    let mut nl_pkt_buf: [u8; 1024] = [0u8; 1024];
+
+    info!("Starting to monitor interface {}", if_name);
+    
+    tasks.spawn_blocking(move || {
+        loop {
+            match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
+                Ok(pkt) => {
+                    let _ = tx_vrrp.blocking_send(pkt);
+                },
+                Err(err) => {
+                    error!("Fail VR {}", err);
+                },
+            }
+        }
+    });
+
+    tasks.spawn_blocking(move || {
+        loop {
+            match recv_nl_packet(&nl_sock_fd, &mut nl_pkt_buf, if_ind) {
+                Ok(attributes) => {
+                    let _ = tx_netlink.blocking_send(attributes);
+                },
+                Err(err) => {
+                    error!("Fail NL {}", err);
+                }
+            }
+        }
+    });
+
+    Ok(tasks)
 }

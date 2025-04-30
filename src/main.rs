@@ -1,10 +1,10 @@
 pub mod vrrp;
 
 use clap::Parser;
-use log::{error, info};
+use log::error;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp::{start_vrouter_cfile, start_vrrp_listener, test_nl_monitor};
+use vrrp::{start_vrouter_cfile, start_listener};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -39,7 +39,7 @@ fn main() {
 
     match args.router {
         true => {
-            let (shutdown_tx, shutdown_rx) = channel::<()>(1);
+            let (_shutdown_tx, shutdown_rx) = channel::<()>(1);
 
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
@@ -53,11 +53,11 @@ fn main() {
                 }
             };
 
-            ctrlc::set_handler(move || {
-                info!("received shutdown signal..");
-                _ = shutdown_tx.clone().blocking_send(());
-            })
-            .expect("failed to setup signal handler");
+            // ctrlc::set_handler(move || {
+            //     info!("received shutdown signal..");
+            //     _ = shutdown_tx.clone().blocking_send(());
+            // })
+            // .expect("failed to setup signal handler");
 
             runtime.block_on(start_vrouter_cfile(
                 format!("{}", &args.config_file_path),
@@ -77,7 +77,7 @@ fn main() {
                 }
             };
 
-            runtime.block_on(start_vrrp_listener(args.interface));
+            runtime.block_on(start_listener(args.interface));
         }
     };
 }
