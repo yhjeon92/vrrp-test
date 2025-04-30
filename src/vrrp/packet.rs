@@ -1,5 +1,6 @@
 use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 
+use itertools::Itertools;
 use log::{debug, error};
 
 use crate::vrrp::constants::{
@@ -10,14 +11,22 @@ use crate::vrrp::constants::{
 // Size 8
 /* used for adding / deleting ip address to network interface via Netlink socket */
 pub struct IfAddrMessage {
-    ifa_family: u8,
+    pub ifa_family: u8,
     ifa_prefixlen: u8,
     ifa_flags: u8,
     ifa_scope: u8,
-    ifa_index: u32,
+    pub ifa_index: u32,
 }
 
 impl IfAddrMessage {
+    pub fn _print(&self) {
+        debug!("\tifa_family {}", self.ifa_family);
+        debug!("\tifa_prefixlen {}", self.ifa_prefixlen);
+        debug!("\tifa_flags {}", self.ifa_flags);
+        debug!("\tifa_scope {}", self.ifa_scope);
+        debug!("\tifa_index {}", self.ifa_index);
+    }
+
     pub fn new(family: u8, prefix_len: u8, flags: u8, scope: u8, index: u32) -> IfAddrMessage {
         IfAddrMessage {
             ifa_family: family,
@@ -25,6 +34,20 @@ impl IfAddrMessage {
             ifa_flags: flags,
             ifa_scope: scope,
             ifa_index: index,
+        }
+    }
+
+    pub fn from_slice(buf: &[u8]) -> Option<IfAddrMessage> {
+        if buf.len() < size_of::<IfAddrMessage>() {
+            None
+        } else {
+            Some(IfAddrMessage {
+                ifa_family: buf[0],
+                ifa_prefixlen: buf[1],
+                ifa_flags: buf[2],
+                ifa_scope: buf[3],
+                ifa_index: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            })
         }
     }
 
@@ -53,8 +76,8 @@ impl IfAddrMessage {
     <---- NLMSG_HDRLEN -----> <- NLMSG_ALIGN(len) -> <---- NLMSG_HDRLEN ---
 */
 pub struct NetLinkMessageHeader {
-    msg_len: u32,
-    msg_type: u16,
+    pub msg_len: u32,
+    pub msg_type: u16,
     msg_flags: u16,
     msg_seq: u32,
     msg_pid: u32,
@@ -124,6 +147,31 @@ impl NetLinkMessageHeader {
     }
 }
 
+pub struct NetLinkAttribute {
+    pub header: NetLinkAttributeHeader,
+    pub payload: Vec<u8>,
+}
+
+impl NetLinkAttribute {
+    pub fn print(&self) {
+        debug!("\tnla_len: {}", self.header.nla_len);
+        debug!("\tnla_type: {}", self.header.nla_type);
+        debug!("\tpayload: {}", self.payload.iter().map(|byte| format!("{:02x?}", byte)).join(" "));
+    }
+
+    pub fn new(header: NetLinkAttributeHeader) -> NetLinkAttribute {
+        NetLinkAttribute {
+            header,
+            payload: Vec::<u8>::new(),
+        }
+    }
+}
+
+// TOOD: refactor to util
+pub fn pad_len(len: usize, align_to: usize) -> usize {
+    (len + align_to - 1) & !(align_to - 1)
+}
+
 // Hdr Size 4
 /*
      <----------- nla_total_size(payload) ----------->
@@ -136,8 +184,8 @@ impl NetLinkMessageHeader {
      <---- NLA_HDRLEN -----> <--- NLA_ALIGN(len) ---> <---- NLA_HDRLEN ---
 */
 pub struct NetLinkAttributeHeader {
-    nla_len: u16,
-    nla_type: u16,
+    pub nla_len: u16,
+    pub nla_type: u16,
 }
 
 impl NetLinkAttributeHeader {
@@ -145,7 +193,7 @@ impl NetLinkAttributeHeader {
         NetLinkAttributeHeader { nla_len, nla_type }
     }
 
-    pub fn _from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
+    pub fn from_slice(buf: &[u8]) -> Option<NetLinkAttributeHeader> {
         if buf.len() < size_of::<NetLinkAttributeHeader>() {
             None
         } else {

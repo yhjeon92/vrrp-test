@@ -4,7 +4,7 @@ use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
-use vrrp::{start_vrouter_cfile, start_vrrp_listener};
+use vrrp::{start_vrouter_cfile, start_vrrp_listener, test_nl_monitor};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -65,7 +65,19 @@ fn main() {
             ));
         }
         false => {
-            start_vrrp_listener(args.interface);
+            let runtime = match Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    error!("runtime creation failed: {}", err.to_string());
+                    return;
+                }
+            };
+
+            runtime.block_on(start_vrrp_listener(args.interface));
         }
     };
 }

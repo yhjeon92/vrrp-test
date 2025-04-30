@@ -1,10 +1,11 @@
 use std::net::Ipv4Addr;
 
 // Socket
-pub const _AF_UNSPEC: i32 = 0x00;
-pub const AF_INET: i32 = 0x02;
-pub const _AF_NETLINK: u16 = 0x10;
-pub const AF_PACKET: i32 = 0x11;
+pub const _AF_UNSPEC: u8 = 0x00;
+pub const AF_INET: u8 = 0x02;
+pub const AF_INET6: u8 = 0x0A;
+pub const _AF_NETLINK: u8 = 0x10;
+pub const AF_PACKET: u8 = 0x11;
 
 pub const SOCK_DGRAM: i32 = 0x02;
 pub const SOCK_RAW: i32 = 0x03;
@@ -29,6 +30,11 @@ pub const IFR_FLAG_MULTICAST: i16 = 0x1000;
 
 // NetLink Message
 pub const NLMSG_ALIGNTO: u32 = 4;
+
+// NetLink Address Group
+pub const RTMGRP_LINK: u32 = 1;
+pub const RTMGRP_IPV4_IFADDR: u32 = 0x10;
+pub const _RTMGRP_IPV6_IFADDR: u32 = 0x100;
 
 // Message Types (rtnetlink)
 pub const RTM_NEWADDR: u16 = 0x14;
@@ -55,9 +61,13 @@ pub const RT_SCOPE_UNIVERSE: u8 = 0;
 // NetLink attributes
 pub const NLATTR_ALIGNTO: u16 = 4;
 
-pub const IFA_ADDRESS: u16 = 1;
-pub const IFA_LOCAL: u16 = 2;
-pub const _IFA_LABEL: u16 = 3;
+// NetLink attribute Types
+pub const IFA_ADDRESS: u16 = 0x01;
+pub const IFA_LOCAL: u16 = 0x02;
+pub const _IFA_LABEL: u16 = 0x03;
+pub const _IFA_BROADCAST: u16 = 0x04;
+pub const _IFA_CACHEINFO: u16 = 0x06;
+pub const _IFA_FLAGS: u16 = 0x08;
 
 pub const SOCKET_TTL: u8 = 0xFF;
 

@@ -7,15 +7,16 @@ mod socket;
 use core::fmt;
 use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::AsRawFd, str::FromStr};
 
+use interface::get_if_index;
 use log::{debug, error, info, warn};
-use packet::VrrpV2Packet;
+use packet::{NetLinkAttribute, VrrpV2Packet};
 use router::{Event, Router};
 use serde::{
     de::Error,
     {Deserialize, Serialize},
 };
-use socket::{open_advertisement_socket, open_arp_socket, recv_vrrp_packet};
-use tokio::sync::mpsc::{self, Receiver};
+use socket::{open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet, recv_vrrp_packet_async};
+use tokio::sync::mpsc::{self, channel, Receiver};
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -249,7 +250,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             // do nothing
         }
         Err(err) => {
-            error!("TEST_LOG: {}", err.to_string());
+            error!("Failed to start a router: {}, exiting...", err.to_string());
             return;
         }
     }
@@ -376,7 +377,7 @@ pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver
     start_vrouter(config, shutdown_rx).await;
 }
 
-pub fn start_vrrp_listener(if_name: String) {
+pub async fn start_vrrp_listener(if_name: String) {
     let vrrp_sock_fd = match open_advertisement_socket(&if_name, true) {
         Ok(fd) => fd,
         Err(err) => {
@@ -389,39 +390,101 @@ pub fn start_vrrp_listener(if_name: String) {
 
     info!("Listening for vRRPv2 packets...");
 
-    // Listener Main Loop
-    loop {
-        let vrrp_pkt: VrrpV2Packet = match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-            Ok(pkt) => pkt,
-            Err(err) => {
-                error!("{}", err.to_string());
-                continue;
-            }
-        };
+    // TODO: Netlink Monitor Test
+    let nl_sock_fd = match open_netlink_monitor_socket() {
+        Ok(fd) => fd,
+        Err(err) => {
+            error!("Failed to open a netlink socket: {}, exiting...", err.to_string());
+            return;
+        }
+    };
 
-        let router_id = vrrp_pkt.router_id;
-        let priority = vrrp_pkt.priority;
-        let src_addr = vrrp_pkt.ip_src.clone();
-        let vip_addresses = vrrp_pkt
-            .vip_addresses
-            .iter()
-            .map(|address| format!("{} ", address.to_string()))
-            .collect::<String>();
+    let if_ind = match get_if_index(&if_name) {
+        Ok(ind) => ind,
+        Err(err) => {
+            error!("{}", err);
+            return;
+        }
+    };
 
-        info!(
-            "VRRPv2 advertisement received: router id {} - prior {} - src {}.{}.{}.{}",
-            router_id, priority, src_addr[0], src_addr[1], src_addr[2], src_addr[3]
-        );
+    let mut nl_pkt_buf: [u8; 1024] = [0u8; 1024];
 
-        info!("Virtual IPs: {}", vip_addresses);
-
-        match vrrp_pkt.verify() {
-            Ok(_) => {
-                vrrp_pkt.print();
-            }
-            Err(err) => {
-                warn!("Invalid VRRP packet received: {}", err);
+    let (tx_vr, mut rx_vr) = channel::<VrrpV2Packet>(1);
+    let (tx_nl, mut rx_nl) = channel::<Vec<NetLinkAttribute>>(1);
+    
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
+                Ok(pkt) => {
+                    let _ = tx_vr.blocking_send(pkt);
+                },
+                Err(err) => {
+                    error!("Fail VR {}", err);
+                },
             }
         }
-    }
+    });
+
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match recv_nl_packet(&nl_sock_fd, &mut nl_pkt_buf, if_ind) {
+                Ok(attributes) => {
+                    let _ = tx_nl.blocking_send(attributes);
+                },
+                Err(err) => {
+                    error!("Fail NL {}", err);
+                }
+            }
+        }
+    });
+
+    loop {
+        debug!("[TEST] Listening...");
+        tokio::select! {
+            Some(pkt) = rx_vr.recv() => {
+                info!("Received VRRP advertisement");
+            },
+            Some(attrs) = rx_nl.recv() => {
+                info!("Received Netlink Event");
+                for attr in attrs.iter() {
+                    attr.print();
+                }
+            },
+        }
+    };
+}
+
+pub fn test_nl_monitor(if_name: &str) {
+    // let sock_fd = match open_netlink_monitor_socket() {
+    //     Ok(fd) => fd,
+    //     Err(err) => {
+    //         error!("{}", err);
+    //         return;
+    //     }
+    // };
+
+    // let if_ind = match get_if_index(if_name) {
+    //     Ok(ind) => ind,
+    //     Err(err) => {
+    //         error!("{}", err);
+    //         return;
+    //     }
+    // };
+
+    // let mut pkt_buf: [u8; 1024] = [0u8; 1024];
+
+    // loop {
+    //     match recv_nl_packet(&sock_fd, &mut pkt_buf, if_ind) {
+    //         Ok(hdr) => {
+    //             if hdr.len() > 0 {
+    //                 for nl_attr in hdr.iter() {
+    //                     nl_attr.print();
+    //                 }
+    //             }
+    //         },
+    //         Err(err) => {
+    //             error!("{}", err);
+    //         },
+    //     }
+    // }
 }
