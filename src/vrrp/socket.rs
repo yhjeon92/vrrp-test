@@ -18,12 +18,12 @@ use log::debug;
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
-        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags,
-        SockFlag, SockProtocol, SockaddrIn, SockaddrLike,
+        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags, SockFlag, SockProtocol, SockaddrIn, SockaddrLike
     },
 };
+use tokio::io::unix::AsyncFd;
 
-use super::{constants::{AF_INET6, RTMGRP_IPV4_IFADDR, RTMGRP_LINK, RTM_DELADDR, RTM_NEWADDR}, interface::get_ip_address, packet::NetLinkMessageHeader};
+use super::{constants::{AF_INET6, RTMGRP_IPV4_IFADDR, RTMGRP_LINK, RTM_DELADDR, RTM_NEWADDR, SOCK_NONBLOCK}, interface::get_ip_address, packet::NetLinkMessageHeader};
 
 pub fn open_ip_socket() -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
@@ -47,7 +47,10 @@ pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<Owned
 
     unsafe {
         // AddressFamily AF_INET 0x02, SocketType SOCK_RAW 0x03, Protocol IPPROTO_VRRPV2 0x70 (112; vrrp)
-        sock_fd = match socket(AF_INET as i32, SOCK_RAW, IPPROTO_VRRPV2) {
+        sock_fd = match socket(
+            AF_INET as i32, 
+            SOCK_RAW,
+            IPPROTO_VRRPV2) {
             -1 => {
                 return Err(format!(
                     "Failed to open a raw socket - check the process privileges"
@@ -179,6 +182,153 @@ pub fn open_advertisement_socket(if_name: &str, multicast: bool) -> Result<Owned
     return Ok(sock_fd);
 }
 
+pub fn open_advertisement_monitor_socket(if_name: &str, multicast: bool) -> Result<AsyncFd<OwnedFd>, String> {
+    let sock_fd: OwnedFd;
+
+    unsafe {
+        // AddressFamily AF_INET 0x02, SocketType SOCK_RAW 0x03, Protocol IPPROTO_VRRPV2 0x70 (112; vrrp)
+        sock_fd = match socket(
+            AF_INET as i32, 
+            SOCK_RAW | SOCK_NONBLOCK,
+            IPPROTO_VRRPV2) {
+            -1 => {
+                return Err(format!(
+                    "Failed to open a raw socket - check the process privileges"
+                ));
+            }
+            fd => OwnedFd::from_raw_fd(fd),
+        };
+    }
+
+    // SOL_SOCKET, SO_REUSEADDR
+    match setsockopt(&sock_fd, sockopt::ReuseAddr, &true) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Error while applying ReuseAddr option for socket {}: {}",
+                sock_fd.as_raw_fd().to_string(),
+                err
+            ));
+        }
+    }
+
+    if multicast {
+        match set_if_multicast_flag(&sock_fd, if_name) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err);
+            }
+        }
+
+        // IPPROTO_IP, IP_MULTICAST_LOOP
+        match setsockopt(&sock_fd, sockopt::IpMulticastLoop, &false) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IpMulticastLoop option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        // IPPROTO_IP, IP_MULTICAST_TTL
+        match setsockopt(&sock_fd, sockopt::IpMulticastTtl, &SOCKET_TTL) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IPv4TTL option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        let ip_mreq = IpMembershipRequest::new(
+            VRRP_MCAST_ADDR,
+            Some(match get_ip_address(if_name) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    return Err(format!("Failed to join multicast group: {}", err));
+                }
+            }),
+        );
+
+        // IPPROTO_IP, IP_ADD_MEMBERSHIP
+        match setsockopt(&sock_fd, sockopt::IpAddMembership, &ip_mreq) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Error while requesting IP Membership: {}", err));
+            }
+        }
+
+        match bind(
+            sock_fd.as_raw_fd(),
+            &SockaddrIn::new(224, 0, 0, 18, IPPROTO_VRRPV2 as u16),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Binding socket failed: {}", err));
+            }
+        }
+    } else {
+        match setsockopt(&sock_fd, sockopt::Ipv4Ttl, &(SOCKET_TTL as i32)) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Error while applying IPv4TTL option for socket {}: {}",
+                    sock_fd.as_raw_fd().to_string(),
+                    err
+                ));
+            }
+        }
+
+        let local_addr = match get_ip_address(if_name) {
+            Ok(addr) => addr,
+            Err(err) => {
+                return Err(format!("Failed to fetch local net address: {}", err));
+            }
+        };
+
+        match bind(
+            sock_fd.as_raw_fd(),
+            &SockaddrIn::new(
+                local_addr.octets()[0],
+                local_addr.octets()[1],
+                local_addr.octets()[2],
+                local_addr.octets()[3],
+                IPPROTO_VRRPV2 as u16,
+            ),
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Binding socket failed: {}", err));
+            }
+        }
+    }
+
+    // SOL_SOCKET, SO_BINDTODEVICE
+    match setsockopt(&sock_fd, sockopt::BindToDevice, &OsString::from(if_name)) {
+        Ok(_) => {}
+        Err(err) => {
+            return Err(format!(
+                "Failed to bind advert socket to interface {}: {}",
+                if_name,
+                err.to_string()
+            ));
+        }
+    }
+
+    return Ok(
+        match AsyncFd::new(sock_fd) {
+            Ok(async_fd) => async_fd,
+            Err(err) => {
+                return Err(format!("Cannot wait on netlink socket: {}. Check socket flags.", err.to_string()));
+            }
+        }
+    );
+}
+
 pub fn open_arp_socket(if_name: &str) -> Result<OwnedFd, String> {
     let sock_fd: OwnedFd;
 
@@ -261,11 +411,11 @@ pub fn open_netlink_socket() -> Result<OwnedFd, String> {
     Ok(sock_fd)
 }
 
-pub fn open_netlink_monitor_socket() -> Result<OwnedFd, String> {
+pub fn open_netlink_monitor_socket() -> Result<AsyncFd<OwnedFd>, String> {
     let sock_fd = match nix::sys::socket::socket(
         socket::AddressFamily::Netlink,
         socket::SockType::Raw,
-        SockFlag::empty(),
+        SockFlag::SOCK_NONBLOCK,
         SockProtocol::NetlinkRoute,
     ) {
         Ok(fd) => fd,
@@ -307,7 +457,14 @@ pub fn open_netlink_monitor_socket() -> Result<OwnedFd, String> {
         }
     };
 
-    Ok(sock_fd)
+    Ok(
+        match AsyncFd::new(sock_fd) {
+            Ok(async_fd) => async_fd,
+            Err(err) => {
+                return Err(format!("Cannot wait on netlink socket: {}. Check socket flags.", err.to_string()));
+            }
+        }
+    )
 }
 
 pub fn send_advertisement(sock_fd: i32, mut vrrp_pkt: VrrpV2Packet) -> Result<(), String> {

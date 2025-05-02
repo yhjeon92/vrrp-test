@@ -11,6 +11,7 @@ pub const SOCK_DGRAM: i32 = 0x02;
 pub const SOCK_RAW: i32 = 0x03;
 
 // Socket Flags
+pub const SOCK_NONBLOCK: i32 = 0x800;
 pub const SOCK_CLOEXEC: i32 = 0x80000;
 
 pub const _IPPROTO_ICMP: i32 = 0x01;

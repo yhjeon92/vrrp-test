@@ -5,7 +5,7 @@ mod router;
 mod socket;
 
 use core::fmt;
-use std::{fs::File, io::Read, net::Ipv4Addr, str::FromStr};
+use std::{fs::File, io::{ErrorKind, Read}, net::Ipv4Addr, str::FromStr};
 
 use interface::get_if_index;
 use log::{debug, error, info, warn};
@@ -15,8 +15,8 @@ use serde::{
     de::Error,
     {Deserialize, Serialize},
 };
-use socket::{open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet};
-use tokio::{sync::mpsc::{self, channel, Receiver, Sender}, task::JoinSet};
+use socket::{open_advertisement_monitor_socket, open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet};
+use tokio::{io::unix::AsyncFd, sync::mpsc::{self, channel, Receiver, Sender}, task::JoinSet};
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -188,7 +188,7 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
     }
 }
 
-pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) {
+pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) -> Result<(), String> {
     let (tx_vrrp, mut rx_vrrp) = mpsc::channel::<VrrpV2Packet>(1);
     let (tx_netlink, mut rx_netlink) = mpsc::channel::<Vec<NetLinkAttribute>>(1);
 
@@ -205,19 +205,18 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     ) {
         Ok(fd) => fd,
         Err(err) => {
-            error!("Failed to open a socket: {}, exiting...", err.to_string());
-            return;
+            return Err(format!("Failed to open a socket: {}, exiting...", err.to_string()));
+            
         }
     };
 
     let arp_sock_fd = match open_arp_socket(&if_name) {
         Ok(fd) => fd,
         Err(err) => {
-            error!(
+            return Err(format!(
                 "Failed to open an arp socket: {}, exiting...",
                 err.to_string()
-            );
-            return;
+            ));
         }
     };
 
@@ -226,8 +225,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
         match vrrp_sock_fd.try_clone() {
             Ok(fd) => fd,
             Err(err) => {
-                error!("Failed to clone socket fd: {}, exiting...", err.to_string());
-                return;
+                return Err(format!("Failed to clone socket fd: {}, exiting...", err.to_string()));
             }
         },
         arp_sock_fd,
@@ -237,11 +235,10 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     ) {
         Ok(router) => router,
         Err(err) => {
-            error!(
+            return Err(format!(
                 "Failed to initialize a router: {}, exiting...",
                 err.to_string()
-            );
-            return;
+            ));
         }
     };
 
@@ -254,15 +251,14 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             // do nothing
         }
         Err(err) => {
-            error!("Failed to start a router: {}, exiting...", err.to_string());
-            return;
+            return Err(format!("Failed to start a router: {}, exiting...", err.to_string()));
         }
     }
 
     info!("Router Startup");
     info!("Listening for vRRPv2 packets...");
 
-    let mut monitor_handles = match start_monitor_task(
+    let mut js = match start_monitor_task(
         &config.interface, 
         match config.unicast_peers {
             Some(_) => false,
@@ -273,8 +269,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     ).await {
         Ok(handles) => handles,
         Err(err) => {
-            error!("{}", err);
-            return;
+            return Err(format!("Failed to start monitoring tasks: {}, exiting...", err.to_string()));
         }
     };
 
@@ -316,8 +311,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                         )).await {
                             Ok(()) => {}
                             Err(err) => {
-                                error!("Failed to send event: {}, exiting...", err.to_string());
-                                return;
+                                return Err(format!("Failed to send event: {}, exiting...", err.to_string()));
                             }
                         }
                     }
@@ -328,6 +322,7 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
             },
             Some(attrs) = rx_netlink.recv() => {
                 info!("Received Netlink Event");
+                // TODO: Filter here, if anything happens to the primary address send to router
                 for attr in attrs.iter() {
                     attr.print();
                 }
@@ -348,40 +343,50 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                     }
                 }
 
-                monitor_handles.shutdown().await;
+                js.abort_all();
+
                 break;
+            },
+            else => {
+                // No Action
             }
         }
     }
 
+    js.abort_all();
+
     info!("virtual router terminated");
+
+    Ok(())
 }
 
-pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver<()>) {
+pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver<()>) -> Result<(), String> {
     let config = match read_config(&config_file_path) {
         Some(config) => config,
         None => {
-            return;
+            return Err(format!("Failed to read configuration from file {}", &config_file_path));
         }
     };
 
-    start_vrouter(config, shutdown_rx).await;
+    start_vrouter(config, shutdown_rx).await?;
+
+    Ok(())
 }
 
-pub async fn start_listener(if_name: String) {
+pub async fn start_listener(if_name: String, mut shutdown_rx: Receiver<()>) -> Result<(), String> {
     let (tx_vr, mut rx_vr) = channel::<VrrpV2Packet>(1);
     let (tx_nl, mut rx_nl) = channel::<Vec<NetLinkAttribute>>(1);
     
-    match start_monitor_task(&if_name, false, tx_vr, tx_nl).await {
-        Ok(_handles) => {},
+    let mut js = match start_monitor_task(&if_name, true, tx_vr, tx_nl).await {
+        Ok(handles) => handles,
         Err(err) => {
-            error!("{}", err);
-            return;
+            return Err(err);
         }
     };
 
+    info!("Starting to monitor interface {}", if_name);
+
     loop {
-        debug!("[TEST] Listening...");
         tokio::select! {
             Some(pkt) = rx_vr.recv() => {
                 info!("Received VRRP advertisement");
@@ -393,8 +398,21 @@ pub async fn start_listener(if_name: String) {
                     attr.print();
                 }
             },
+            Some(()) = shutdown_rx.recv() => {
+                debug!("Stopping a listener thread");
+
+                js.abort_all();
+                break;
+            },
+            else => {
+                // No Action
+            },
         }
     };
+
+    debug!("[TEST] Stopping Listener..");
+
+    Ok(())
 }
 
 async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Sender<VrrpV2Packet>, tx_netlink: Sender<Vec<NetLinkAttribute>>)
@@ -402,21 +420,9 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
 {
     let mut tasks = JoinSet::new();
 
-    let vrrp_sock_fd = match open_advertisement_socket(if_name, advert_multicast) {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!("Failed to open a socket: {}, exiting...", err.to_string());
-            return Err("".to_string());
-        }
-    };
+    let vrrp_sock = open_advertisement_monitor_socket(if_name, advert_multicast)?;
 
-    let nl_sock_fd = match open_netlink_monitor_socket() {
-        Ok(fd) => fd,
-        Err(err) => {
-            error!("Failed to open a netlink socket: {}, exiting...", err.to_string());
-            return Err("".to_string());
-        }
-    };
+    let nl_sock = open_netlink_monitor_socket()?;
 
     let if_ind = match get_if_index(if_name) {
         Ok(ind) => ind,
@@ -431,28 +437,75 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
 
     info!("Starting to monitor interface {}", if_name);
     
-    tasks.spawn_blocking(move || {
+    tasks.spawn(async move {
         loop {
-            match recv_vrrp_packet(&vrrp_sock_fd, &mut pkt_buf) {
-                Ok(pkt) => {
-                    let _ = tx_vrrp.blocking_send(pkt);
+            match vrrp_sock.readable().await {
+                Ok(mut fd_guard) => {
+                    match fd_guard.try_io(|guard| {
+                        let fd = guard.get_ref();
+                        match recv_vrrp_packet(fd, &mut pkt_buf) {
+                            Ok(pkt) => {
+                                tx_vrrp.blocking_send(pkt).or(Err(std::io::Error::last_os_error()))
+                            },
+                            Err(err) => {
+                                // warn!("Fail VR {}", err);
+                                warn!("Reading VRRP packet failed: {}", err);
+                                Err(std::io::Error::last_os_error())
+                            },
+                        }
+                    }) {
+                        Ok(Ok(())) => {
+                            debug!("[TEST] VRRP Success");
+                        },
+                        Ok(Err(err)) => {
+                            debug!("[TEST] VRRP internal error from channel i/o: {}", err.to_string());
+                        },
+                        Err(_err) => {
+                            warn!("[TEST] AsyncFdTryIOError");
+                            break;
+                        },
+                    };
                 },
                 Err(err) => {
-                    error!("Fail VR {}", err);
+                    error!("I/O Error: {}", err.to_string());
+                    break;
                 },
             }
         }
     });
 
-    tasks.spawn_blocking(move || {
+    tasks.spawn(async move {
         loop {
-            match recv_nl_packet(&nl_sock_fd, &mut nl_pkt_buf, if_ind) {
-                Ok(attributes) => {
-                    let _ = tx_netlink.blocking_send(attributes);
+            match nl_sock.readable().await {
+                Ok(mut fd_guard) => {
+                    match fd_guard.try_io(|guard| {
+                        let fd = guard.get_ref();
+                        match recv_nl_packet(fd, &mut nl_pkt_buf, if_ind) {
+                            Ok(attributes) => {
+                                tx_netlink.blocking_send(attributes).or(Err(std::io::Error::last_os_error()))
+                            },
+                            Err(err) => {
+                                warn!("Reading Netlink packet failed: {}", err);
+                                Err(std::io::Error::last_os_error())
+                            }
+                        }
+                    }) {
+                        Ok(Ok(())) => {
+                            debug!("[TEST] NL Success");
+                        },
+                        Ok(Err(err)) => {
+                            debug!("[TEST] NL internal error from channel i/o: {}", err.to_string());
+                        },
+                        Err(_err) => {
+                            warn!("[TEST] AsyncFdTryIOError");
+                            break;
+                        },
+                    }
                 },
                 Err(err) => {
-                    error!("Fail NL {}", err);
-                }
+                    error!("I/O Error: {}", err.to_string());
+                    break;
+                },
             }
         }
     });

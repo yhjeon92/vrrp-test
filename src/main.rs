@@ -1,7 +1,9 @@
 pub mod vrrp;
 
+use std::time::Duration;
+
 use clap::Parser;
-use log::error;
+use log::{error, info};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::channel;
 use vrrp::{start_vrouter_cfile, start_listener};
@@ -37,10 +39,10 @@ fn main() {
         return;
     }
 
+    let (shutdown_tx, shutdown_rx) = channel::<()>(1);
+
     match args.router {
         true => {
-            let (_shutdown_tx, shutdown_rx) = channel::<()>(1);
-
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(3)
@@ -53,11 +55,11 @@ fn main() {
                 }
             };
 
-            // ctrlc::set_handler(move || {
-            //     info!("received shutdown signal..");
-            //     _ = shutdown_tx.clone().blocking_send(());
-            // })
-            // .expect("failed to setup signal handler");
+            ctrlc::set_handler(move || {
+                info!("received shutdown signal..");
+                _ = shutdown_tx.blocking_send(());
+            })
+            .expect("failed to setup signal handler");
 
             runtime.block_on(start_vrouter_cfile(
                 format!("{}", &args.config_file_path),
@@ -67,7 +69,7 @@ fn main() {
         false => {
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(1)
+                .worker_threads(15)
                 .build()
             {
                 Ok(rt) => rt,
@@ -77,7 +79,17 @@ fn main() {
                 }
             };
 
-            runtime.block_on(start_listener(args.interface));
+            ctrlc::set_handler(move || {
+                info!("received shutdown signal..");
+                _ = shutdown_tx.blocking_send(());
+            })
+            .expect("failed to setup signal handler");
+
+            _ = runtime.block_on(start_listener(args.interface, shutdown_rx));
+
+            info!("Shutting Down Runtime...");
         }
     };
+
+    info!("Shutting Down...");
 }
