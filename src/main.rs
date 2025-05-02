@@ -1,7 +1,5 @@
 pub mod vrrp;
 
-use std::time::Duration;
-
 use clap::Parser;
 use log::{error, info};
 use tokio::runtime::Builder;
@@ -45,7 +43,7 @@ fn main() {
         true => {
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(3)
+                .worker_threads(5)
                 .build()
             {
                 Ok(rt) => rt,
@@ -61,15 +59,24 @@ fn main() {
             })
             .expect("failed to setup signal handler");
 
-            runtime.block_on(start_vrouter_cfile(
+            match runtime.block_on(start_vrouter_cfile(
                 format!("{}", &args.config_file_path),
                 shutdown_rx,
-            ));
+            )) {
+                Ok(()) => {
+                    info!("Gracefully stopping router..");
+                },
+                Err(err) => {
+                    error!("{}", err);
+                },
+            }
+
+            info!("Shutting Down Router...");
         }
         false => {
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(15)
+                .worker_threads(5)
                 .build()
             {
                 Ok(rt) => rt,
@@ -85,11 +92,16 @@ fn main() {
             })
             .expect("failed to setup signal handler");
 
-            _ = runtime.block_on(start_listener(args.interface, shutdown_rx));
+            match runtime.block_on(start_listener(args.interface, shutdown_rx)) {
+                Ok(()) => {
+                    info!("Gracefully stopping listener..");
+                },
+                Err(err) => {
+                    error!("{}", err);
+                },
+            }
 
             info!("Shutting Down Runtime...");
         }
     };
-
-    info!("Shutting Down...");
 }

@@ -5,11 +5,12 @@ mod router;
 mod socket;
 
 use core::fmt;
-use std::{fs::File, io::{ErrorKind, Read}, net::Ipv4Addr, str::FromStr};
+use std::{convert::TryInto, fs::File, io::Read, net::Ipv4Addr, os::fd::OwnedFd, str::FromStr};
 
+use constants::{IFA_ADDRESS, IFA_LOCAL, RTM_DELADDR, RTM_NEWADDR};
 use interface::get_if_index;
 use log::{debug, error, info, warn};
-use packet::{NetLinkAttribute, VrrpV2Packet};
+use packet::{NetLinkAttribute, NetLinkMessageHeader, VrrpV2Packet};
 use router::{Event, Router};
 use serde::{
     de::Error,
@@ -190,7 +191,7 @@ fn read_config(file_path: &str) -> Option<VRouterConfig> {
 
 pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>) -> Result<(), String> {
     let (tx_vrrp, mut rx_vrrp) = mpsc::channel::<VrrpV2Packet>(1);
-    let (tx_netlink, mut rx_netlink) = mpsc::channel::<Vec<NetLinkAttribute>>(1);
+    let (tx_netlink, mut rx_netlink) = mpsc::channel::<(NetLinkMessageHeader, Vec<NetLinkAttribute>)>(1);
 
     let (tx_router, rx_router) = mpsc::channel::<Event>(3);
 
@@ -320,11 +321,34 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                     }
                 }
             },
-            Some(attrs) = rx_netlink.recv() => {
+            Some((nl_hdr, attrs)) = rx_netlink.recv() => {
                 info!("Received Netlink Event");
                 // TODO: Filter here, if anything happens to the primary address send to router
-                for attr in attrs.iter() {
-                    attr.print();
+                let mut send_demote = false;
+                if nl_hdr.msg_type == RTM_DELADDR {
+                    for attr in attrs.iter() {
+                        if attr.header.nla_type == IFA_LOCAL || attr.header.nla_type == IFA_ADDRESS {
+                            if attr.payload.len() == 4 {
+                                for vip in config.vip_addresses.iter() {
+                                    if Ipv4Addr::from(vec_to_addr_arr(attr.payload.clone())?).eq(&vip.address) {
+                                        send_demote = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if send_demote {
+                                break;
+                            }
+                        }
+                        attr.print();
+                    }
+                } else if nl_hdr.msg_type == RTM_NEWADDR {
+
+                }
+
+                if send_demote {
+                    // Demote
                 }
             },
             Some(()) = shutdown_rx.recv() => {
@@ -375,9 +399,9 @@ pub async fn start_vrouter_cfile(config_file_path: String, shutdown_rx: Receiver
 
 pub async fn start_listener(if_name: String, mut shutdown_rx: Receiver<()>) -> Result<(), String> {
     let (tx_vr, mut rx_vr) = channel::<VrrpV2Packet>(1);
-    let (tx_nl, mut rx_nl) = channel::<Vec<NetLinkAttribute>>(1);
+    let (tx_nl, mut rx_nl) = channel::<(NetLinkMessageHeader, Vec<NetLinkAttribute>)>(1);
     
-    let mut js = match start_monitor_task(&if_name, true, tx_vr, tx_nl).await {
+    let mut js: JoinSet<()> = match start_monitor_task(&if_name, true, tx_vr, tx_nl).await {
         Ok(handles) => handles,
         Err(err) => {
             return Err(err);
@@ -392,7 +416,7 @@ pub async fn start_listener(if_name: String, mut shutdown_rx: Receiver<()>) -> R
                 info!("Received VRRP advertisement");
                 pkt.print();
             },
-            Some(attrs) = rx_nl.recv() => {
+            Some((nl_hdr, attrs)) = rx_nl.recv() => {
                 info!("Received Netlink Event");
                 for attr in attrs.iter() {
                     attr.print();
@@ -410,12 +434,10 @@ pub async fn start_listener(if_name: String, mut shutdown_rx: Receiver<()>) -> R
         }
     };
 
-    debug!("[TEST] Stopping Listener..");
-
     Ok(())
 }
 
-async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Sender<VrrpV2Packet>, tx_netlink: Sender<Vec<NetLinkAttribute>>)
+async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Sender<VrrpV2Packet>, tx_netlink: Sender<(NetLinkMessageHeader, Vec<NetLinkAttribute>)>)
     -> Result<JoinSet<()>, String>
 {
     let mut tasks = JoinSet::new();
@@ -434,8 +456,6 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
 
     let mut pkt_buf: [u8; 1024] = [0u8; 1024];
     let mut nl_pkt_buf: [u8; 1024] = [0u8; 1024];
-
-    info!("Starting to monitor interface {}", if_name);
     
     tasks.spawn(async move {
         loop {
@@ -445,29 +465,31 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
                         let fd = guard.get_ref();
                         match recv_vrrp_packet(fd, &mut pkt_buf) {
                             Ok(pkt) => {
-                                tx_vrrp.blocking_send(pkt).or(Err(std::io::Error::last_os_error()))
+                                Ok(pkt)
                             },
                             Err(err) => {
-                                // warn!("Fail VR {}", err);
                                 warn!("Reading VRRP packet failed: {}", err);
                                 Err(std::io::Error::last_os_error())
                             },
                         }
                     }) {
-                        Ok(Ok(())) => {
-                            debug!("[TEST] VRRP Success");
+                        Ok(Ok(pkt)) => {
+                            match tx_vrrp.send(pkt).await {
+                                Ok(()) => {},
+                                Err(err) => {
+                                    warn!("Channel send() error: {}", err.to_string());
+                                },
+                            };
                         },
-                        Ok(Err(err)) => {
-                            debug!("[TEST] VRRP internal error from channel i/o: {}", err.to_string());
+                        Ok(Err(_err)) => {
                         },
                         Err(_err) => {
-                            warn!("[TEST] AsyncFdTryIOError");
-                            break;
+                            continue;
                         },
                     };
                 },
                 Err(err) => {
-                    error!("I/O Error: {}", err.to_string());
+                    error!("Cannot read from socket: {}", err.to_string());
                     break;
                 },
             }
@@ -478,32 +500,41 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
         loop {
             match nl_sock.readable().await {
                 Ok(mut fd_guard) => {
-                    match fd_guard.try_io(|guard| {
+                    match fd_guard.try_io(|guard: &AsyncFd<OwnedFd>| {
                         let fd = guard.get_ref();
                         match recv_nl_packet(fd, &mut nl_pkt_buf, if_ind) {
                             Ok(attributes) => {
-                                tx_netlink.blocking_send(attributes).or(Err(std::io::Error::last_os_error()))
+                                Ok(attributes)
                             },
                             Err(err) => {
-                                warn!("Reading Netlink packet failed: {}", err);
+                                if !err.is_empty() {
+                                    warn!("Reading Netlink packet failed: {}", err);
+                                }
                                 Err(std::io::Error::last_os_error())
                             }
                         }
                     }) {
-                        Ok(Ok(())) => {
-                            debug!("[TEST] NL Success");
+                        Ok(Ok((nl_hdr, attributes))) => {
+                            if attributes.len() > 0 {
+                                match tx_netlink.send((nl_hdr, attributes)).await {
+                                    Ok(()) => {},
+                                    Err(err) => {
+                                        warn!("Channel send() error: {}", err.to_string());
+                                    },
+                                };
+                            } else {
+                                continue;
+                            }
                         },
-                        Ok(Err(err)) => {
-                            debug!("[TEST] NL internal error from channel i/o: {}", err.to_string());
+                        Ok(Err(_err)) => {
                         },
                         Err(_err) => {
-                            warn!("[TEST] AsyncFdTryIOError");
-                            break;
+                            continue;
                         },
                     }
                 },
                 Err(err) => {
-                    error!("I/O Error: {}", err.to_string());
+                    error!("Cannot read from socket: {}", err.to_string());
                     break;
                 },
             }
@@ -511,4 +542,19 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
     });
 
     Ok(tasks)
+}
+
+fn vec_to_addr_arr(src: Vec<u8>) -> Result<[u8; 4], String> {
+    if src.len() != 4 {
+        return Err(format!("Mismatched vector size {}", src.len()));
+    }
+
+    let mut addr = [0u8; 4];
+
+    addr[0] = *src.get(0).ok_or(format!(""))?;
+    addr[1] = *src.get(1).ok_or(format!(""))?;
+    addr[2] = *src.get(2).ok_or(format!(""))?;
+    addr[3] = *src.get(3).ok_or(format!(""))?;
+
+    Ok(addr)
 }

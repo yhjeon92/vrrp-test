@@ -1,7 +1,5 @@
 use std::{
-    ffi::OsString,
-    net::Ipv4Addr,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    ffi::OsString, io::IoSliceMut, net::Ipv4Addr, os::fd::{AsRawFd, FromRawFd, OwnedFd}
 };
 
 use crate::vrrp::{
@@ -14,11 +12,11 @@ use crate::vrrp::{
     Ipv4WithNetmask,
 };
 use itertools::Itertools;
-use log::debug;
+use log::{debug, warn};
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
-        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags, SockFlag, SockProtocol, SockaddrIn, SockaddrLike
+        self, bind, recv, recvfrom, recvmsg, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockaddrIn, SockaddrLike
     },
 };
 use tokio::io::unix::AsyncFd;
@@ -587,7 +585,12 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
     let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
         Ok((pkt_len, _)) => pkt_len,
         Err(err) => {
-            return Err(format!("recvfrom() error: {}", err.to_string()));
+            if err.eq(&nix::errno::Errno::EAGAIN) {
+                return Err(format!(""));
+            } else {
+                warn!("recvfrom() error: {}", err.to_string());
+                return Err(format!("recvfrom() error: {}", err.to_string()));
+            }
         }
     };
 
@@ -623,11 +626,16 @@ pub fn recv_vrrp_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8]) -> Result<VrrpV2P
 /// or neither RTM_NEWADDR nor RTM_DELADDR
 /// Returns error in case of socket or parsing error,
 /// a vector of 0 length if received message is not of vrrp's interest.
-pub fn recv_nl_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8], if_ind: u32) -> Result<Vec<NetLinkAttribute>, String> {
+pub fn recv_nl_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8], if_ind: u32) -> Result<(NetLinkMessageHeader, Vec<NetLinkAttribute>), String> {
     let len = match recvfrom::<SockaddrIn>(sock_fd.as_raw_fd(), pkt_buf) {
         Ok((len, _)) => len,
         Err(err) => {
-            return Err(format!("recvfrom() error: {}", err.to_string()));
+            if err.eq(&nix::errno::Errno::EAGAIN) {
+                return Err(format!(""));
+            } else {
+                warn!("recvfrom() error: {}", err.to_string());
+                return Err(format!("recvfrom() error: {}", err.to_string()));
+            }
         }
     };
 
@@ -652,7 +660,7 @@ pub fn recv_nl_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8], if_ind: u32) -> Res
             };
 
             if ifa_hdr.ifa_index != if_ind {
-                return Ok(Vec::new());
+                return Ok((nl_resp_hdr, Vec::new()));
             }
 
             match ifa_hdr.ifa_family {
@@ -681,17 +689,17 @@ pub fn recv_nl_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8], if_ind: u32) -> Res
                         ind += pad_len(payload_len, 4);
                     }
         
-                    Ok(nla_list)
+                    Ok((nl_resp_hdr, nla_list))
                 },
                 _ => {
-                    Ok(Vec::new())
+                    Ok((nl_resp_hdr, Vec::new()))
                 }
             }
 
             
         },
         _ => {
-            Ok(Vec::new())
+            Ok((nl_resp_hdr, Vec::new()))
         },
     }
 }
