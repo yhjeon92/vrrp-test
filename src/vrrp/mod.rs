@@ -2,10 +2,11 @@ mod constants;
 mod interface;
 mod packet;
 mod router;
+mod util;
 mod socket;
 
 use core::fmt;
-use std::{convert::TryInto, fs::File, io::Read, net::Ipv4Addr, os::fd::OwnedFd, str::FromStr};
+use std::{fs::File, io::Read, net::Ipv4Addr, os::fd::OwnedFd, str::FromStr};
 
 use constants::{IFA_ADDRESS, IFA_LOCAL, RTM_DELADDR, RTM_NEWADDR};
 use interface::get_if_index;
@@ -18,6 +19,7 @@ use serde::{
 };
 use socket::{open_advertisement_monitor_socket, open_advertisement_socket, open_arp_socket, open_netlink_monitor_socket, recv_nl_packet, recv_vrrp_packet};
 use tokio::{io::unix::AsyncFd, sync::mpsc::{self, channel, Receiver, Sender}, task::JoinSet};
+use util::vec_to_addr_arr;
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Ipv4WithNetmask {
@@ -277,10 +279,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
     loop {
         tokio::select! {
             Some(vrrp_pkt) = rx_vrrp.recv() => {
-                let router_id = vrrp_pkt.router_id;
-                let priority = vrrp_pkt.priority;
-                let src_addr = vrrp_pkt.ip_src.clone();
-
                 match vrrp_pkt.verify() {
                     Ok(_) => {
                         /* additional packet validation using local VRouter config */
@@ -305,9 +303,9 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                         }
 
                         match tx_router.send(Event::AdvertReceived(
-                            router_id,
-                            priority,
-                            Ipv4Addr::from(src_addr),
+                            vrrp_pkt.router_id,
+                            vrrp_pkt.priority,
+                            Ipv4Addr::from(vrrp_pkt.ip_src.clone()),
                             vrrp_pkt.vip_addresses,
                         )).await {
                             Ok(()) => {}
@@ -341,7 +339,6 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
                                 break;
                             }
                         }
-                        attr.print();
                     }
                 } else if nl_hdr.msg_type == RTM_NEWADDR {
 
@@ -349,6 +346,12 @@ pub async fn start_vrouter(config: VRouterConfig, mut shutdown_rx: Receiver<()>)
 
                 if send_demote {
                     // Demote
+                    match tx_router.send(Event::Demote).await {
+                        Ok(()) => {}
+                        Err(err) => {
+                            return Err(format!("Failed to send event: {}, exiting...", err.to_string()));
+                        }
+                    }
                 }
             },
             Some(()) = shutdown_rx.recv() => {
@@ -421,6 +424,20 @@ pub async fn start_listener(if_name: String, mut shutdown_rx: Receiver<()>) -> R
                 for attr in attrs.iter() {
                     attr.print();
                 }
+
+                if nl_hdr.msg_type == RTM_DELADDR | RTM_NEWADDR {
+                    for attr in attrs.iter() {
+                        if attr.header.nla_type == IFA_LOCAL || attr.header.nla_type == IFA_ADDRESS {
+                            if attr.payload.len() == 4 {
+                                info!("Address {} {} interface {}", 
+                                    Ipv4Addr::from(vec_to_addr_arr(attr.payload.clone())?),
+                                    if nl_hdr.msg_type == RTM_DELADDR { "deleted from" } else { "added to" },
+                                    &if_name
+                                );
+                            }
+                        }
+                    }
+                };
             },
             Some(()) = shutdown_rx.recv() => {
                 debug!("Stopping a listener thread");
@@ -468,7 +485,9 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
                                 Ok(pkt)
                             },
                             Err(err) => {
-                                warn!("Reading VRRP packet failed: {}", err);
+                                if !err.is_empty() {
+                                    warn!("Reading VRRP packet failed: {}", err);
+                                }
                                 Err(std::io::Error::last_os_error())
                             },
                         }
@@ -542,19 +561,4 @@ async fn start_monitor_task(if_name: &str, advert_multicast: bool, tx_vrrp: Send
     });
 
     Ok(tasks)
-}
-
-fn vec_to_addr_arr(src: Vec<u8>) -> Result<[u8; 4], String> {
-    if src.len() != 4 {
-        return Err(format!("Mismatched vector size {}", src.len()));
-    }
-
-    let mut addr = [0u8; 4];
-
-    addr[0] = *src.get(0).ok_or(format!(""))?;
-    addr[1] = *src.get(1).ok_or(format!(""))?;
-    addr[2] = *src.get(2).ok_or(format!(""))?;
-    addr[3] = *src.get(3).ok_or(format!(""))?;
-
-    Ok(addr)
 }

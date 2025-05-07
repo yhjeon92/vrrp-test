@@ -17,10 +17,6 @@ services:
     cap_add:
       - CAP_NET_ADMIN
       - CAP_NET_RAW
-    volumes:
-      - ./test/vrrp-1.toml:/etc/vrrp/vrrp.toml
-      - ./test/test_promote.sh:/etc/vrrp/test_promote.sh
-      - ./test/test_demote.sh:/etc/vrrp/test_demote.sh
     networks:
       default:
         ipv4_address: 172.18.0.2
@@ -32,7 +28,7 @@ services:
     environment:
       VRRP_IF: "eth0"
       VRRP_RID: 50
-      VRRP_PRIORITY: 98
+      VRRP_PRIORITY: 50
       VRRP_VIP: 172.18.0.100
       VRRP_NETMASK_LEN: 16
       VRRP_ADVERT_INT: 5
@@ -40,10 +36,6 @@ services:
     cap_add:
       - CAP_NET_ADMIN
       - CAP_NET_RAW
-    volumes:
-      - ./test/vrrp-2.toml:/etc/vrrp/vrrp.toml
-      - ./test/test_promote.sh:/etc/vrrp/test_promote.sh
-      - ./test/test_demote.sh:/etc/vrrp/test_demote.sh
     networks:
       default:
         ipv4_address: 172.18.0.3

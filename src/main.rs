@@ -1,8 +1,11 @@
 pub mod vrrp;
 
+use std::process::ExitCode;
+
 use clap::Parser;
 use log::{error, info};
-use tokio::runtime::Builder;
+use tokio::{select, task};
+use tokio::{runtime::Builder, signal::unix::SignalKind};
 use tokio::sync::mpsc::channel;
 use vrrp::{start_vrouter_cfile, start_listener};
 
@@ -43,7 +46,7 @@ fn main() {
         true => {
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(5)
+                .worker_threads(3)
                 .build()
             {
                 Ok(rt) => rt,
@@ -53,30 +56,44 @@ fn main() {
                 }
             };
 
-            ctrlc::set_handler(move || {
-                info!("received shutdown signal..");
-                _ = shutdown_tx.blocking_send(());
-            })
-            .expect("failed to setup signal handler");
+            match runtime.block_on(async move {
+                let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
 
-            match runtime.block_on(start_vrouter_cfile(
-                format!("{}", &args.config_file_path),
-                shutdown_rx,
-            )) {
+                task::spawn(start_vrouter_cfile(
+                    format!("{}", &args.config_file_path),
+                    shutdown_rx,
+                ));
+
+                loop {
+                    select! {
+                        _ = sigterm.recv() => {
+                            info!("received SIGTERM..");
+                            match shutdown_tx.send(()).await {
+                                Ok(()) => {},
+                                Err(err) => {
+                                    return Err(err.to_string());
+                                },
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                Ok::<(), String>(())
+            }) {
                 Ok(()) => {
                     info!("Gracefully stopping router..");
                 },
                 Err(err) => {
                     error!("{}", err);
+                    std::process::exit(1);
                 },
             }
-
-            info!("Shutting Down Router...");
         }
         false => {
             let runtime = match Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(5)
+                .worker_threads(3)
                 .build()
             {
                 Ok(rt) => rt,
@@ -86,22 +103,36 @@ fn main() {
                 }
             };
 
-            ctrlc::set_handler(move || {
-                info!("received shutdown signal..");
-                _ = shutdown_tx.blocking_send(());
-            })
-            .expect("failed to setup signal handler");
+            match runtime.block_on(async move {
+                let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
 
-            match runtime.block_on(start_listener(args.interface, shutdown_rx)) {
+                task::spawn(start_listener(args.interface, shutdown_rx));
+
+                loop {
+                    select! {
+                        _ = sigterm.recv() => {
+                            info!("received SIGTERM..");
+                            match shutdown_tx.send(()).await {
+                                Ok(()) => {},
+                                Err(err) => {
+                                    return Err(err.to_string());
+                                },
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                Ok::<(), String>(())
+            }) {
                 Ok(()) => {
                     info!("Gracefully stopping listener..");
                 },
                 Err(err) => {
                     error!("{}", err);
+                    std::process::exit(1);
                 },
             }
-
-            info!("Shutting Down Runtime...");
         }
     };
 }

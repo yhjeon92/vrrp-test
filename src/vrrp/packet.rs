@@ -3,10 +3,10 @@ use std::{convert::TryInto, mem::size_of, net::Ipv4Addr};
 use itertools::Itertools;
 use log::{debug, error};
 
-use crate::vrrp::constants::{
+use crate::vrrp::{constants::{
     BROADCAST_MAC, ETH_PROTO_ARP, ETH_PROTO_IP, HW_TYPE_ETH, IPPROTO_VRRPV2, IP_DSCP, IP_VER_IHL,
     NLATTR_ALIGNTO, NLMSG_ALIGNTO, SOCKET_TTL, VRRP_HDR_LEN, VRRP_MCAST_ADDR, VRRP_VER_TYPE,
-};
+}, util::pad_len};
 
 // Size 8
 /* used for adding / deleting ip address to network interface via Netlink socket */
@@ -165,11 +165,35 @@ impl NetLinkAttribute {
             payload: Vec::<u8>::new(),
         }
     }
-}
 
-// TOOD: refactor to util
-pub fn pad_len(len: usize, align_to: usize) -> usize {
-    (len + align_to - 1) & !(align_to - 1)
+    pub fn vec_from_slice(buf: &[u8]) -> Vec<NetLinkAttribute> {
+        const ATTR_HDR_LEN : usize = size_of::<NetLinkAttributeHeader>();
+
+        let mut nl_attrs = Vec::<NetLinkAttribute>::new();
+
+        let len = buf.len();
+        let mut ind : usize = 0;
+
+        while ind + ATTR_HDR_LEN < len {
+            let nl_attr_hdr = match NetLinkAttributeHeader::from_slice(&buf[ind..ind+ATTR_HDR_LEN]) {
+                Some(hdr) => hdr,
+                None => {
+                    return nl_attrs;
+                }
+            };
+
+            ind += ATTR_HDR_LEN;
+            let payload_len = nl_attr_hdr.nla_len as usize - ATTR_HDR_LEN;
+
+            let mut nl_attr = NetLinkAttribute::new(nl_attr_hdr);
+            nl_attr.payload.append(&mut Vec::from(&buf[ind..ind+payload_len]));
+
+            ind += pad_len(payload_len, NLATTR_ALIGNTO as usize);
+            nl_attrs.push(nl_attr);
+        }
+
+        nl_attrs
+    }
 }
 
 // Hdr Size 4

@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString, io::IoSliceMut, net::Ipv4Addr, os::fd::{AsRawFd, FromRawFd, OwnedFd}
+    ffi::OsString, net::Ipv4Addr, os::fd::{AsRawFd, FromRawFd, OwnedFd}
 };
 
 use crate::vrrp::{
@@ -8,7 +8,7 @@ use crate::vrrp::{
         SOCKET_TTL, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_RAW, VRRP_MCAST_ADDR,
     },
     interface::{get_if_index, get_mac_address, set_if_multicast_flag},
-    packet::{pad_len, GarpPacket, IfAddrMessage, NetLinkAttribute, NetLinkAttributeHeader, VrrpV2Packet},
+    packet::{GarpPacket, IfAddrMessage, NetLinkAttribute, VrrpV2Packet},
     Ipv4WithNetmask,
 };
 use itertools::Itertools;
@@ -16,7 +16,7 @@ use log::{debug, warn};
 use nix::{
     libc::{sockaddr, sockaddr_ll, socket},
     sys::socket::{
-        self, bind, recv, recvfrom, recvmsg, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockaddrIn, SockaddrLike
+        self, bind, recvfrom, setsockopt, sockopt, IpMembershipRequest, LinkAddr, MsgFlags, SockFlag, SockProtocol, SockaddrIn, SockaddrLike
     },
 };
 use tokio::io::unix::AsyncFd;
@@ -667,27 +667,7 @@ pub fn recv_nl_packet(sock_fd: &OwnedFd, pkt_buf: &mut [u8], if_ind: u32) -> Res
                 AF_INET | AF_INET6 => {
                     ind += size_of::<IfAddrMessage>();
 
-                    let mut nla_list = Vec::<NetLinkAttribute>::new();
-        
-                    while ind < len {
-                        let nl_attr_header = match NetLinkAttributeHeader::from_slice(&pkt_buf[ind..ind+size_of::<NetLinkAttributeHeader>()]) {
-                            Some(hdr) => hdr,
-                            None => {
-                                return Err("".to_string());
-                            }
-                        };
-        
-                        let payload_len = (nl_attr_header.nla_len - 4) as usize;
-        
-                        ind += size_of::<NetLinkAttributeHeader>();
-        
-                        let mut nl_attr = NetLinkAttribute::new(nl_attr_header);
-        
-                        nl_attr.payload.append(&mut Vec::from(&pkt_buf[ind..ind+payload_len]));
-                        nla_list.push(nl_attr);
-        
-                        ind += pad_len(payload_len, 4);
-                    }
+                    let nla_list = NetLinkAttribute::vec_from_slice(&pkt_buf[ind..len]);
         
                     Ok((nl_resp_hdr, nla_list))
                 },

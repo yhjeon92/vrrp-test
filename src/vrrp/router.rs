@@ -39,6 +39,7 @@ pub enum Event {
     MasterDown,
     // RouterId - Priority - Source - VIPs
     AdvertReceived(u8, u8, Ipv4Addr, Vec<Ipv4Addr>),
+    Demote,
 }
 
 impl fmt::Display for Event {
@@ -57,6 +58,7 @@ impl fmt::Display for Event {
                     .collect::<String>()
             ),
             Event::ShutDown => write!(f, "ShutDown"),
+            Event::Demote => write!(f, "Demote"),
         }
     }
 }
@@ -516,6 +518,43 @@ impl Router {
                                 return;
                             }
                         },
+                        Event::Demote => match self.state {
+                            State::Master => {
+                                info!("Received force demote event. Demoting to BACKUP state..");
+                                // Stop advert timer
+                                match advert_timer_tx {
+                                    Some(ref tx) => {
+                                        _ = tx.send(TimerEvent::Abort).await
+                                    }
+                                    None => {
+                                        warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                    }
+                                };
+
+                                advert_timer_tx = None;
+
+                                match self.demote_to_backup(&elect_pkt) {
+                                    Ok(()) => {}
+                                    Err(err) => {
+                                        warn!(
+                                            "Error while demoting to backup: {}",
+                                            err
+                                        );
+                                    }
+                                }
+
+                                // Start master down timer
+                                master_timer_tx = Some(start_master_down_timer(
+                                    self.master_down_int,
+                                    self.router_tx.clone(),
+                                ));
+
+                                self.state = State::Backup;
+                            },
+                            _ => {
+                                // No Action
+                            }
+                        }
                     };
                 }
                 _ => {

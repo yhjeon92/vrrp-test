@@ -12,7 +12,7 @@ if [ ! -f ./vrrp.toml ]; then
 fi
 
 if [[ -z "${VERBOSE}" ]]; then
-  vrrp-test -i eth0 -r -c vrrp.toml
+  exec vrrp-test -i eth0 -r -c vrrp.toml
 else
-  vrrp-test -i eth0 -r -v -c vrrp.toml
+  exec vrrp-test -i eth0 -r -v -c vrrp.toml
 fi
