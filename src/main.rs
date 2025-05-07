@@ -1,7 +1,5 @@
 pub mod vrrp;
 
-use std::process::ExitCode;
-
 use clap::Parser;
 use log::{error, info};
 use tokio::{select, task};

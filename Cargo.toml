@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2018"
 
 [dependencies]
-nix = { version = "0.29.0", features = ["socket", "net", "uio", "event"] }
+nix = { version = "0.29.0", features = ["socket", "net", "uio"] }
 serde = { version = "1.0.2", features = ["derive"] }
 clap = { version = "4.5.8", features = ["derive"] }
 itertools = "0.10"
