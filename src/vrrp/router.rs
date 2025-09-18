@@ -40,6 +40,8 @@ pub enum Event {
     // RouterId - Priority - Source - VIPs
     AdvertReceived(u8, u8, Ipv4Addr, Vec<Ipv4Addr>),
     Demote,
+    // Command - Error
+    ScriptFailed(String, String),
 }
 
 impl fmt::Display for Event {
@@ -59,6 +61,7 @@ impl fmt::Display for Event {
             ),
             Event::ShutDown => write!(f, "ShutDown"),
             Event::Demote => write!(f, "Demote"),
+            Event::ScriptFailed(cmd, err) => write!(f, "ScriptFailed cmd {} err {}", cmd, err),
         }
     }
 }
@@ -134,7 +137,12 @@ impl Router {
             master_down_int: (3 as f32 * config.advert_int as f32)
                 + ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
             skew_time: ((256 as u16 - config.priority as u16) as f32 / 256 as f32),
-            preempt_mode: true,
+            // defaults to true - BACKUP with higher priority tries to override existing MASTER if enabled
+            preempt_mode: if let Some(preempt) = config.preempt_mode {
+                preempt
+            } else {
+                true
+            },
             pre_promote_script: config.pre_promote_script,
             pre_demote_script: config.pre_demote_script,
             unicast_peers: config.unicast_peers,
@@ -198,6 +206,46 @@ impl Router {
                     debug!("{}", event);
 
                     match event {
+                        Event::ScriptFailed(_cmd, _err) => {
+                            match self.state {
+                                State::Master => {
+                                    info!(
+                                        "Failed to execute promotion script. Demoting to BACKUP state..."
+                                    );
+
+                                    // Stop advert timer
+                                    match advert_timer_tx {
+                                        Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
+                                        None => {
+                                            warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
+                                        }
+                                    };
+
+                                    advert_timer_tx = None;
+
+                                    match self.demote_to_backup(&elect_pkt).await {
+                                        Ok(()) => {}
+                                        Err(err) => {
+                                            warn!("Error while demoting to backup: {}", err);
+                                        }
+                                    }
+
+                                    tokio::time::sleep(Duration::from_secs(self.advert_int as u64))
+                                        .await;
+
+                                    // Start master down timer
+                                    master_timer_tx = Some(start_master_down_timer(
+                                        self.master_down_int,
+                                        self.router_tx.clone(),
+                                    ));
+
+                                    self.state = State::Backup;
+                                }
+                                _ => {
+                                    // No Action
+                                }
+                            }
+                        }
                         Event::Startup => {
                             match self.state {
                                 State::Initialize => {
@@ -218,7 +266,7 @@ impl Router {
                                             }
                                         }
 
-                                        match self.promote_to_master() {
+                                        match self.promote_to_master().await {
                                             Ok(()) => {}
                                             Err(err) => {
                                                 error!("Failed to initialize as master: {}", err);
@@ -309,7 +357,11 @@ impl Router {
                                                     match master_timer_tx {
                                                         Some(ref tx) => {
                                                             _ = tx
-                                                                .send(TimerEvent::ResetTimerInterval(self.master_down_int))
+                                                                .send(
+                                                                    TimerEvent::ResetTimerInterval(
+                                                                        self.master_down_int,
+                                                                    ),
+                                                                )
                                                                 .await
                                                         }
                                                         None => {
@@ -353,7 +405,7 @@ impl Router {
                                             // Acquire virtual IP
                                             // This does not comply with RFC 3768 - additional safety measure for Cloud environment
                                             // where bare-metal ip link addr and arping is not sufficient to acquire Virtual IP
-                                            match self.promote_to_master() {
+                                            match self.promote_to_master().await {
                                                 Ok(()) => {}
                                                 Err(err) => {
                                                     error!("Failed to acquire virtual ip: {}", err);
@@ -376,7 +428,7 @@ impl Router {
                                             }
 
                                             // Received an Advert with higher priority - demoting to BACKUP
-                                        } else if (!self.preempt_mode || priority > self.priority)
+                                        } else if priority > self.priority
                                             || (priority == self.priority
                                                 && src_addr > self.local_addr)
                                         {
@@ -400,7 +452,7 @@ impl Router {
 
                                             advert_timer_tx = None;
 
-                                            match self.demote_to_backup(&elect_pkt) {
+                                            match self.demote_to_backup(&elect_pkt).await {
                                                 Ok(()) => {}
                                                 Err(err) => {
                                                     warn!(
@@ -438,7 +490,7 @@ impl Router {
                                     }
                                 }
 
-                                match self.promote_to_master() {
+                                match self.promote_to_master().await {
                                     Ok(()) => {}
                                     Err(err) => {
                                         error!("Failed to promote: {}", err);
@@ -504,7 +556,7 @@ impl Router {
                                     }
                                 };
 
-                                match self.demote_to_backup(&elect_pkt) {
+                                match self.demote_to_backup(&elect_pkt).await {
                                     Ok(()) => {}
                                     Err(err) => {
                                         warn!("Error while demoting to backup: {}", err);
@@ -523,9 +575,7 @@ impl Router {
                                 info!("Received force demote event. Demoting to BACKUP state..");
                                 // Stop advert timer
                                 match advert_timer_tx {
-                                    Some(ref tx) => {
-                                        _ = tx.send(TimerEvent::Abort).await
-                                    }
+                                    Some(ref tx) => _ = tx.send(TimerEvent::Abort).await,
                                     None => {
                                         warn!("No reference to the Master Down timer was found. Skip stopping the timer..");
                                     }
@@ -533,13 +583,10 @@ impl Router {
 
                                 advert_timer_tx = None;
 
-                                match self.demote_to_backup(&elect_pkt) {
+                                match self.demote_to_backup(&elect_pkt).await {
                                     Ok(()) => {}
                                     Err(err) => {
-                                        warn!(
-                                            "Error while demoting to backup: {}",
-                                            err
-                                        );
+                                        warn!("Error while demoting to backup: {}", err);
                                     }
                                 }
 
@@ -550,11 +597,11 @@ impl Router {
                                 ));
 
                                 self.state = State::Backup;
-                            },
+                            }
                             _ => {
                                 // No Action
                             }
-                        }
+                        },
                     };
                 }
                 _ => {
@@ -572,17 +619,11 @@ impl Router {
         }
     }
 
-    fn demote_to_backup(&mut self, elect_pkt: &VrrpV2Packet) -> Result<(), String> {
+    async fn demote_to_backup(&mut self, elect_pkt: &VrrpV2Packet) -> Result<(), String> {
         match &self.pre_demote_script {
-            Some(command) => match execute_command(command.to_owned()) {
-                Ok(()) => {}
-                Err(err) => {
-                    return Err(format!(
-                        "Failed to execute pre_demote script [{}]: {}",
-                        command, err
-                    ));
-                }
-            },
+            Some(command) => {
+                execute_command(command.to_owned(), self.router_tx.clone()).await;
+            }
             None => {}
         }
 
@@ -609,17 +650,11 @@ impl Router {
         Ok(())
     }
 
-    fn promote_to_master(&mut self) -> Result<(), String> {
+    async fn promote_to_master(&mut self) -> Result<(), String> {
         match &self.pre_promote_script {
-            Some(command) => match execute_command(command.to_owned()) {
-                Ok(()) => {}
-                Err(err) => {
-                    return Err(format!(
-                        "Failed to execute pre_promote script [{}]: {}",
-                        command, err
-                    ));
-                }
-            },
+            Some(command) => {
+                execute_command(command.to_owned(), self.router_tx.clone()).await;
+            }
             None => {}
         }
 
@@ -733,7 +768,7 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
             Some(event) = rx.recv() => {
                 match event {
                     TimerEvent::ResetTimerInterval(int) => {
-                        info!("resetting master down timer interval..");
+                        debug!("resetting master down timer interval..");
                         timer_int = int;
                     }
                     TimerEvent::Abort => {
@@ -756,51 +791,63 @@ async fn master_down_timer(interval: f32, tx: Sender<Event>, mut rx: Receiver<Ti
     }
 }
 
-fn execute_command(command: String) -> Result<(), String> {
-    let mut elements = command.split_whitespace();
+async fn execute_command(command: String, tx: Sender<Event>) {
+    let cmd = command.clone();
 
-    match elements.next() {
-        Some(program) => {
-            let mut cmd = Command::new(program);
-            elements.by_ref().for_each(|arg| {
-                cmd.arg(arg);
-            });
+    tokio::task::spawn_blocking(move || {
+        let mut elements = cmd.split_whitespace();
+        match elements.next() {
+            Some(program) => {
+                let mut cmd = Command::new(program);
+                elements.by_ref().for_each(|arg| {
+                    cmd.arg(arg);
+                });
 
-            match cmd.output() {
-                Ok(output) => match output.status.code().unwrap() {
-                    0 => {
-                        info!(
-                            "Command {} returned {} with status code 0",
-                            command,
-                            String::from_utf8(output.stdout).unwrap().trim_end()
-                        );
-                        Ok(())
+                match cmd.output() {
+                    Ok(output) => match output.status.code().unwrap() {
+                        0 => {
+                            info!(
+                                "Command {} returned {} with status code 0",
+                                command,
+                                String::from_utf8(output.stdout).unwrap().trim_end()
+                            );
+                        }
+                        code => {
+                            let err_msg = format!(
+                                "{} {}",
+                                String::from_utf8(output.stdout).unwrap().trim_end(),
+                                String::from_utf8(output.stderr).unwrap().trim_end()
+                            );
+                            warn!("Command {} failed with status code {}", command, code);
+
+                            warn!("Error message: {}", err_msg);
+
+                            match tx.blocking_send(Event::ScriptFailed(command, err_msg)) {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    warn!("Failed to send router event: {}", err.to_string());
+                                }
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        warn!("Command {} failed: {}", command, err.to_string());
+
+                        match tx.blocking_send(Event::ScriptFailed(command, err.to_string())) {
+                            Ok(()) => {}
+                            Err(err) => {
+                                warn!("Failed to send router event: {}", err.to_string());
+                            }
+                        }
                     }
-                    code => {
-                        let err_msg = format!(
-                            "{} {}",
-                            String::from_utf8(output.stdout).unwrap().trim_end(),
-                            String::from_utf8(output.stderr).unwrap().trim_end()
-                        );
-                        warn!(
-                            "Command {} failed with status code {}: {}",
-                            command, code, err_msg
-                        );
-                        Err(err_msg)
-                    }
-                },
-                Err(err) => {
-                    warn!("Command {} failed: {}", command, err.to_string());
-                    Err(err.to_string())
                 }
             }
+            None => {
+                warn!(
+                    "Command {} seems to be empty. Check your configuration.",
+                    command
+                );
+            }
         }
-        None => {
-            warn!(
-                "Command {} seems to be empty. Check your configuration.",
-                command
-            );
-            Ok(())
-        }
-    }
+    });
 }
